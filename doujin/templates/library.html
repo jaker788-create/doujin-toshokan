@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Library — Doujin Bunko{% endblock %}
+{% block content %}
+<form id="filters" method="get" action="/">
+  <input type="search" id="q" name="q" value="{{ q }}" placeholder="Search title or author…">
+  <select name="sort">
+    <option value="title" {% if sort=='title' %}selected{% endif %}>Title</option>
+    <option value="author" {% if sort=='author' %}selected{% endif %}>Author</option>
+    <option value="date" {% if sort=='date' %}selected{% endif %}>Newest</option>
+  </select>
+  <button type="submit">Apply</button>
+</form>
+<div class="grid" id="grid"
+     data-q="{{ q }}" data-sort="{{ sort }}" data-author="{{ author }}"
+     data-tags="{{ tags_selected | join(',') }}"
+     data-next-offset="{{ next_offset }}" data-page-size="{{ page_size }}">
+  {% for m in manga %}
+  <a class="card{% if m['missing'] %} missing{% endif %}" href="/manga/{{ m['id'] }}">
+    {% if m['cover_rel_path'] %}
+    <img loading="lazy" src="/thumb?path={{ (m['folder_path'] ~ '/' ~ m['cover_rel_path']) | urlencode }}&w=240">
+    {% else %}<div class="nocover"></div>{% endif %}
+    <div class="meta"><span class="t">{{ m['title'] }}</span><span class="a">{{ m['author_name'] }}</span></div>
+  </a>
+  {% else %}
+  <p class="empty">No manga yet. <a href="/scan">Scan your library</a> to get started.</p>
+  {% endfor %}
+</div>
+<div id="scroll-sentinel"></div>
+{% endblock %}

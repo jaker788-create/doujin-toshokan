@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+doujin.egg-info/
+
+# Runtime data (kept outside the repo anyway; here as a safety net)
+.doujin/
+*.db
+
+# Local Claude Code / harness state and AI dev-workflow scaffolding
+# (this is an app-only public repo; see the "app-only" scope decision)
+.claude/
+.claude-plugin/
+harness.toml
+Plans.md
+docs/superpowers/

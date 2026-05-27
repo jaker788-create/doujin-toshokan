@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Import all — Doujin Bunko{% endblock %}
+{% block content %}
+<h1>Import all</h1>
+{% if count %}
+<p>{{ count }} folder(s) will be imported with author and title taken from their
+folder names and <strong>no tags</strong>. You can add tags later by browsing.</p>
+<form method="post" action="/import-all">
+  <button type="submit">Import all {{ count }}</button>
+  <a href="/scan" style="margin-left:1rem">Cancel</a>
+</form>
+{% else %}
+<p class="empty">Nothing new to import. <a href="/scan">Back to scan</a></p>
+{% endif %}
+{% endblock %}
