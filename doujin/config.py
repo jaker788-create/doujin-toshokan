@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-
-def _appdata_base() -> str:
-    return os.environ.get("APPDATA") or os.path.expanduser("~/.config")
+from platformdirs import user_data_dir
 
 
 def default_data_dir() -> Path:
-    return Path(_appdata_base()) / "doujin"
+    # roaming=True + appauthor=False keeps the historical Windows location
+    # (%APPDATA%/doujin). On macOS this is ~/Library/Application Support/doujin
+    # and on Linux it follows XDG_DATA_HOME (~/.local/share/doujin).
+    return Path(user_data_dir("doujin", appauthor=False, roaming=True))
 
 
 def migrate_legacy_data_dir(new_dir: Path) -> None:

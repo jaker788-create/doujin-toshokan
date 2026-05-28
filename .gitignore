@@ -4,6 +4,10 @@ __pycache__/
 *.pyc
 doujin.egg-info/
 
+# PyInstaller build artifacts (doujin.spec IS committed; build/ and dist/ are not)
+build/
+dist/
+
 # Runtime data (kept outside the repo anyway; here as a safety net)
 .doujin/
 *.db
