@@ -101,6 +101,7 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
                 limit=PAGE_SIZE,
                 offset=0,
             )
+        total_count = conn.execute("SELECT COUNT(*) FROM manga").fetchone()[0]
         return templates.TemplateResponse(
             request=request,
             name="library.html",
@@ -112,6 +113,7 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
                 "tags_selected": tag,
                 "next_offset": len(rows),
                 "page_size": PAGE_SIZE,
+                "total_count": total_count,
             },
         )
 

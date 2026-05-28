@@ -1,24 +1,47 @@
 // doujin/static/app.js
-// Infinite-scroll library grid + tag autocomplete + gallery lightbox.
+// Infinite-scroll library grid + tag autocomplete + reader nav + lightbox + toasts.
+
 function esc(s) {
   return String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
-// Infinite-scroll library grid: the server renders page 0 and stamps the grid
-// with the active filters + how many cards it rendered (data-next-offset). We
-// append further pages from /api/search as a sentinel scrolls into view. A
-// filter change (typing / sort) is a hard reset; a scroll is an append.
+
+// ───── Toast ──────────────────────────────────────────────────────
+// Slides in from the right; auto-dismisses after 3s. aria-live region
+// in base.html makes the message announced to screen readers too.
+const toastRegion = document.getElementById("toast-region");
+function toast(msg, kind = "ok") {
+  if (!toastRegion) return;
+  const el = document.createElement("div");
+  el.className = "toast" + (kind === "err" ? " toast-err" : "");
+  el.textContent = msg;
+  toastRegion.appendChild(el);
+  // Two-frame defer so the initial transform applies before the .in class.
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add("in")));
+  setTimeout(() => {
+    el.classList.remove("in");
+    setTimeout(() => el.remove(), 400);
+  }, 3000);
+}
+
+// ───── Library grid ───────────────────────────────────────────────
 const grid = document.getElementById("grid");
 const q = document.getElementById("q");
 const sentinel = document.getElementById("scroll-sentinel");
 
 function card(m) {
   const cover = m.cover_rel_path
-    ? `<img loading="lazy" src="/thumb?path=${encodeURIComponent(m.folder_path + "/" + m.cover_rel_path)}&w=240">`
+    ? `<img loading="lazy" src="/thumb?path=${encodeURIComponent(m.folder_path + "/" + m.cover_rel_path)}&w=240" alt="">`
     : `<div class="nocover"></div>`;
-  return `<a class="card" href="/manga/${m.id}">${cover}
-    <div class="meta"><span class="t">${esc(m.title)}</span><span class="a">${esc(m.author)}</span></div></a>`;
+  return `<a class="card" href="/manga/${m.id}">
+    <div class="card-cover">${cover}</div>
+    <div class="meta"><span class="t">${esc(m.title)}</span><span class="a">${esc(m.author)}</span></div>
+  </a>`;
+}
+
+function removeSkeletons() {
+  grid?.querySelectorAll(".card.skeleton").forEach((el) => el.remove());
 }
 
 if (grid) {
@@ -27,8 +50,8 @@ if (grid) {
     offset: parseInt(grid.dataset.nextOffset || "0", 10),
     loading: false,
     done: false,
+    errored: false,
   };
-  // If the server already rendered fewer than a full page, there is no more.
   state.done = state.offset < state.pageSize;
 
   function currentParams() {
@@ -43,8 +66,22 @@ if (grid) {
     return p;
   }
 
+  function showRetryPill() {
+    state.errored = true;
+    if (grid.querySelector(".error-pill")) return;
+    const pill = document.createElement("p");
+    pill.className = "error-pill";
+    pill.innerHTML = `Couldn't load more. <button type="button">Retry</button>`;
+    pill.querySelector("button").addEventListener("click", () => {
+      pill.remove();
+      state.errored = false;
+      loadMore();
+    });
+    grid.appendChild(pill);
+  }
+
   async function loadMore() {
-    if (state.loading || state.done) return;
+    if (state.loading || state.done || state.errored) return;
     state.loading = true;
     let ok = false;
     try {
@@ -52,34 +89,34 @@ if (grid) {
       p.set("limit", state.pageSize);
       p.set("offset", state.offset);
       const res = await fetch(`/api/search?${p.toString()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      removeSkeletons();
       if (state.offset === 0 && data.length === 0) {
-        grid.innerHTML = '<p class="empty">No matches.</p>';
+        grid.innerHTML = '<p class="empty">No matches. <a href="/">clear filters</a></p>';
       } else {
         grid.insertAdjacentHTML("beforeend", data.map(card).join(""));
       }
       state.offset += data.length;
       if (data.length < state.pageSize) state.done = true;
       ok = true;
+    } catch (_e) {
+      showRetryPill();
     } finally {
-      // Always clear the flag — a thrown fetch must not deadlock the scroll.
       state.loading = false;
     }
-    // IntersectionObserver only fires on a visibility CHANGE. If the page we
-    // appended didn't push the sentinel off-screen, keep filling. Only on
-    // success, so a failing fetch can't spin in a tight retry loop.
     if (ok && !state.done && sentinel) {
       if (sentinel.getBoundingClientRect().top < window.innerHeight) loadMore();
     }
   }
 
   function reset() {
-    // The live query box wins over the server-rendered filter bias.
     grid.dataset.q = "";
     grid.dataset.author = "";
     grid.dataset.tags = "";
     state.offset = 0;
     state.done = false;
+    state.errored = false;
     grid.innerHTML = "";
     loadMore();
   }
@@ -98,9 +135,27 @@ if (grid) {
       if (entries.some((e) => e.isIntersecting)) loadMore();
     }).observe(sentinel);
   }
+
+  // Rescan hijack — XHR + toast + refresh grid, no full page navigation.
+  document.querySelector("form[data-rescan]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const btn = form.querySelector("button");
+    btn?.setAttribute("disabled", "true");
+    try {
+      const res = await fetch("/rescan", { method: "POST" });
+      if (!res.ok && res.status !== 303) throw new Error();
+      toast("Library rescanned");
+      reset();
+    } catch (_e) {
+      toast("Rescan failed", "err");
+    } finally {
+      btn?.removeAttribute("disabled");
+    }
+  });
 }
 
-// Tag autocomplete: show a datalist of existing tags for the last comma-token.
+// ───── Tag autocomplete (unchanged behavior, kept) ────────────────
 document.querySelectorAll(".tag-input").forEach((input) => {
   input.addEventListener("input", async () => {
     const token = input.value.split(",").pop().trim();
@@ -118,13 +173,154 @@ document.querySelectorAll(".tag-input").forEach((input) => {
   });
 });
 
-// Lightbox: click any gallery image to view fullscreen; click again to close.
-document.querySelectorAll(".gallery img").forEach((img) => {
-  img.addEventListener("click", () => {
-    const box = document.createElement("div");
-    box.className = "lightbox";
-    box.innerHTML = `<img src="${img.src}">`;
-    box.addEventListener("click", () => box.remove());
-    document.body.appendChild(box);
+// ───── Reader (title page) ────────────────────────────────────────
+// Active only on body[data-page="title"]. Adds keyboard nav, the bottom
+// page counter (driven by IntersectionObserver), image preload, and an
+// improved lightbox with prev/next.
+if (document.body.dataset.page === "title") {
+  const pageImgs = Array.from(document.querySelectorAll(".gallery img"));
+  const counterCur = document.querySelector(".reader-counter .cur");
+  const helpHint = document.querySelector(".reader-help");
+  let currentIdx = 0;
+  let helpShown = false;
+
+  function scrollToPage(i) {
+    const target = pageImgs[Math.max(0, Math.min(pageImgs.length - 1, i))];
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function preloadNeighbors(i) {
+    [i + 1, i + 2].forEach((j) => {
+      const img = pageImgs[j];
+      if (img && img.src) { const p = new Image(); p.src = img.src; }
+    });
+  }
+
+  function showHelp() {
+    if (helpShown || !helpHint) return;
+    helpShown = true;
+    helpHint.classList.add("visible");
+    setTimeout(() => helpHint.classList.remove("visible"), 3500);
+  }
+
+  // Page counter: track the most-intersecting page.
+  if (counterCur && "IntersectionObserver" in window) {
+    let pending = false;
+    const visibility = new Map();
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => visibility.set(e.target, e.intersectionRatio));
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        let bestRatio = 0, bestIdx = currentIdx;
+        pageImgs.forEach((img, i) => {
+          const r = visibility.get(img) || 0;
+          if (r > bestRatio) { bestRatio = r; bestIdx = i; }
+        });
+        if (bestIdx !== currentIdx) {
+          currentIdx = bestIdx;
+          counterCur.textContent = String(bestIdx + 1);
+          preloadNeighbors(bestIdx);
+        }
+      });
+    }, { threshold: [0, 0.25, 0.5, 0.75, 1] });
+    pageImgs.forEach((img) => io.observe(img));
+  }
+
+  // First scroll reveals the keyboard help once.
+  window.addEventListener("scroll", showHelp, { once: true, passive: true });
+
+  // Keyboard navigation. When lightbox is open, the lightbox handler
+  // (further down) catches keys first and stops propagation.
+  document.addEventListener("keydown", (e) => {
+    if (document.querySelector(".lightbox")) return;
+    if (e.target.matches?.("input, textarea, select")) return;
+    if (e.key === "ArrowLeft" || e.key === "k" || e.key === "PageUp") {
+      e.preventDefault(); scrollToPage(currentIdx - 1); showHelp();
+    } else if (e.key === "ArrowRight" || e.key === "j" || e.key === "PageDown" || e.key === " ") {
+      e.preventDefault(); scrollToPage(currentIdx + 1); showHelp();
+    } else if (e.key === "f" || e.key === "F") {
+      e.preventDefault();
+      const next = document.body.dataset.fit === "height" ? "" : "height";
+      if (next) document.body.dataset.fit = next; else delete document.body.dataset.fit;
+      showHelp();
+    }
+  });
+}
+
+// ───── Lightbox (improved) ────────────────────────────────────────
+// Click any gallery image → overlay with close button + prev/next.
+// Esc closes; arrow keys cycle through the gallery list while open.
+function openLightbox(startIdx) {
+  const imgs = Array.from(document.querySelectorAll(".gallery img"));
+  if (!imgs.length) return;
+  let idx = Math.max(0, Math.min(imgs.length - 1, startIdx));
+  const box = document.createElement("div");
+  box.className = "lightbox";
+  box.innerHTML = `
+    <button class="lb-nav lb-prev" type="button" aria-label="Previous">‹</button>
+    <img src="${imgs[idx].src}" alt="">
+    <button class="lb-nav lb-next" type="button" aria-label="Next">›</button>
+    <button class="lb-close" type="button" aria-label="Close">×</button>
+  `;
+  const imgEl = box.querySelector("img");
+  function show(i) {
+    idx = (i + imgs.length) % imgs.length;
+    imgEl.src = imgs[idx].src;
+  }
+  function close() {
+    box.remove();
+    document.removeEventListener("keydown", onKey, true);
+  }
+  function onKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); show(idx - 1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); show(idx + 1); }
+  }
+  box.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.classList.contains("lb-prev")) { e.stopPropagation(); show(idx - 1); }
+    else if (t.classList.contains("lb-next")) { e.stopPropagation(); show(idx + 1); }
+    else if (t.classList.contains("lb-close")) { e.stopPropagation(); close(); }
+    else if (t === box) { close(); }
+  });
+  document.addEventListener("keydown", onKey, true);
+  document.body.appendChild(box);
+}
+document.querySelectorAll(".gallery img").forEach((img, i) => {
+  img.addEventListener("click", () => openLightbox(i));
+});
+
+// ───── Scan / Ingest form hijack ──────────────────────────────────
+// Each ingest row submits over XHR so we can fade the row out and toast
+// without a full page reload. Falls back to the native submit on error.
+document.querySelectorAll("form.ingest-row").forEach((form) => {
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const status = form.querySelector(".row-status");
+    const btn = form.querySelector("button[type=submit]");
+    btn?.setAttribute("disabled", "true");
+    form.classList.add("saving");
+    if (status) { status.classList.remove("err"); status.textContent = "saving…"; }
+    try {
+      const fd = new FormData(form);
+      const res = await fetch("/ingest", { method: "POST", body: fd, redirect: "manual" });
+      // 303 redirect = success path; opaqueredirect status also counts.
+      if (res.type === "opaqueredirect" || res.ok || res.status === 303 || res.status === 0) {
+        form.classList.add("saved");
+        const title = form.dataset.title || "manga";
+        toast(`Saved “${title}”`);
+        setTimeout(() => form.remove(), 400);
+      } else {
+        throw new Error(`HTTP ${res.status}`);
+      }
+    } catch (_err) {
+      form.classList.remove("saving");
+      if (status) { status.classList.add("err"); status.textContent = "save failed"; }
+      btn?.removeAttribute("disabled");
+      toast("Save failed", "err");
+    }
   });
 });

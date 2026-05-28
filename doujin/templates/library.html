@@ -1,8 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Library — Doujin Toshokan{% endblock %}
+{% block page %}library{% endblock %}
 {% block content %}
+<section class="hero">
+  <p class="eyebrow">The Archive</p>
+  <h1 class="hero-title">{{ total_count }} <span>volume{% if total_count != 1 %}s{% endif %}</span></h1>
+</section>
+
 <form id="filters" method="get" action="/">
-  <input type="search" id="q" name="q" value="{{ q }}" placeholder="Search title or author…">
+  <input type="search" id="q" name="q" value="{{ q }}" placeholder="Search title or author…" autocomplete="off">
   <select name="sort">
     <option value="title" {% if sort=='title' %}selected{% endif %}>Title</option>
     <option value="author" {% if sort=='author' %}selected{% endif %}>Author</option>
@@ -10,20 +16,37 @@
   </select>
   <button type="submit">Apply</button>
 </form>
+
+{% if tags_selected or author %}
+<div class="filter-status">
+  <span class="label">Filtered by</span>
+  {% for t in tags_selected %}<span class="chip">#{{ t }}</span>{% endfor %}
+  {% if author %}<span class="chip">author</span>{% endif %}
+  <a class="chip-clear" href="/">clear all</a>
+</div>
+{% endif %}
+
 <div class="grid" id="grid"
      data-q="{{ q }}" data-sort="{{ sort }}" data-author="{{ author }}"
      data-tags="{{ tags_selected | join(',') }}"
      data-next-offset="{{ next_offset }}" data-page-size="{{ page_size }}">
   {% for m in manga %}
   <a class="card{% if m['missing'] %} missing{% endif %}" href="/manga/{{ m['id'] }}">
-    {% if m['cover_rel_path'] %}
-    <img loading="lazy" src="/thumb?path={{ (m['folder_path'] ~ '/' ~ m['cover_rel_path']) | urlencode }}&w=240">
-    {% else %}<div class="nocover"></div>{% endif %}
+    <div class="card-cover">
+      {% if m['cover_rel_path'] %}
+      <img loading="lazy" src="/thumb?path={{ (m['folder_path'] ~ '/' ~ m['cover_rel_path']) | urlencode }}&w=240" alt="">
+      {% else %}<div class="nocover"></div>{% endif %}
+    </div>
     <div class="meta"><span class="t">{{ m['title'] }}</span><span class="a">{{ m['author_name'] }}</span></div>
   </a>
   {% else %}
   <p class="empty">No manga yet. <a href="/scan">Scan your library</a> to get started.</p>
   {% endfor %}
+  {% if manga and next_offset >= page_size %}
+  {% for _ in range(6) %}
+  <div class="card skeleton" aria-hidden="true"><div class="card-cover"></div><div class="meta"></div></div>
+  {% endfor %}
+  {% endif %}
 </div>
 <div id="scroll-sentinel"></div>
 {% endblock %}

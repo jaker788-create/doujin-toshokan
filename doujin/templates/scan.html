@@ -1,25 +1,38 @@
 {% extends "base.html" %}
 {% block title %}Scan / Ingest — Doujin Toshokan{% endblock %}
+{% block page %}scan{% endblock %}
 {% block content %}
-<h1>Folders to ingest</h1>
-{% if found %}<p><a href="/import-all">Import all {{ found|length }} →</a></p>{% endif %}
-{% if not found %}<p class="empty">Nothing new found. Drop folders into a library root and reload.</p>{% endif %}
+<header class="scan-header">
+  <div>
+    <h1>Folders to ingest</h1>
+    <p class="count">{% if found %}{{ found|length }} found on disk{% else %}nothing new{% endif %}</p>
+  </div>
+  {% if found %}<a class="import-all-link" href="/import-all">Import all {{ found|length }} →</a>{% endif %}
+</header>
+
+{% if not found %}
+<p class="empty">Nothing new found. Drop folders into a library root and reload.</p>
+{% endif %}
+
 {% for d in found %}
-<form class="ingest-row" method="post" action="/ingest">
-  {% if d.cover_rel_path %}
-  <img src="/thumb?path={{ (d.folder_path ~ '/' ~ d.cover_rel_path) | urlencode }}&w=120" width="120">
-  {% else %}
-  <div class="nocover" style="width:120px;aspect-ratio:2/3"></div>
-  {% endif %}
+<form class="ingest-row" method="post" action="/ingest" data-folder="{{ d.folder_path }}" data-title="{{ d.title }}">
+  <div class="cover">
+    {% if d.cover_rel_path %}
+    <img src="/thumb?path={{ (d.folder_path ~ '/' ~ d.cover_rel_path) | urlencode }}&w=240" alt="">
+    {% else %}<div class="nocover"></div>{% endif %}
+  </div>
   <div class="fields">
     <input type="hidden" name="folder_path" value="{{ d.folder_path }}">
     <input type="hidden" name="cover_rel_path" value="{{ d.cover_rel_path }}">
     <input type="hidden" name="page_count" value="{{ d.page_count }}">
     <label>Author <input name="author" value="{{ d.author }}"></label>
     <label>Title <input name="title" value="{{ d.title }}"></label>
-    <label>Tags <input class="tag-input" name="tags" placeholder="comma,separated" autocomplete="off"></label>
-    <small>{{ d.page_count }} pages · {{ d.folder_path }}</small>
-    <button type="submit">Save</button>
+    <label class="full">Tags <input class="tag-input" name="tags" placeholder="comma, separated, tags" autocomplete="off"></label>
+    <div class="footer-row">
+      <span class="path">{{ d.page_count }} pages · {{ d.folder_path }}</span>
+      <span class="row-status" role="status"></span>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </div>
   </div>
 </form>
 {% endfor %}

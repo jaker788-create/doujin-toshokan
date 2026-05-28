@@ -1,13 +1,27 @@
 {% extends "base.html" %}
 {% block title %}{{ m['title'] }} — Doujin Toshokan{% endblock %}
+{% block page %}title{% endblock %}
 {% block content %}
-<h1>{{ m['title'] }}</h1>
-<p class="author">by {{ m['author_name'] }} · {{ m['page_count'] }} pages</p>
-<p class="tagrow">{% for t in tags %}<a href="/?tag={{ t }}">#{{ t }}</a>{% endfor %}</p>
-{% if missing %}<p class="empty">⚠ Folder is missing on disk: {{ m['folder_path'] }}</p>{% endif %}
+<a class="back-link" href="/">← The Archive</a>
+<header class="title-header">
+  <h1>{{ m['title'] }}</h1>
+  <p class="byline">by <span class="author">{{ m['author_name'] }}</span><span class="sep">·</span>{{ m['page_count'] }} pages</p>
+  {% if tags %}
+  <p class="tagrow">{% for t in tags %}<a href="/?tag={{ t }}">#{{ t }}</a>{% endfor %}</p>
+  {% endif %}
+  {% if missing %}<p class="notice">Folder is missing on disk: {{ m['folder_path'] }}</p>{% endif %}
+</header>
+
 <div class="gallery">
   {% for p in pages %}
-  <img loading="lazy" src="/image?path={{ p | urlencode }}" alt="page">
+  <img loading="lazy" src="/image?path={{ p | urlencode }}" alt="page {{ loop.index }}" data-page="{{ loop.index }}">
   {% endfor %}
 </div>
+
+{% if pages %}
+<div class="reader-counter" data-total="{{ pages|length }}">
+  <span class="cur">1</span><span class="sep">/</span><span class="tot">{{ pages|length }}</span>
+</div>
+<aside class="reader-help"><kbd>←</kbd><kbd>→</kbd> page · <kbd>F</kbd> fit · <kbd>Esc</kbd> close</aside>
+{% endif %}
 {% endblock %}
