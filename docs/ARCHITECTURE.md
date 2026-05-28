@@ -1,11 +1,11 @@
-# Doujin Bunko — Architecture
+# Doujin Toshokan — Architecture
 
-> A map of how Doujin Bunko is put together and, more importantly, the **load-bearing
+> A map of how Doujin Toshokan is put together and, more importantly, the **load-bearing
 > invariants** that future changes must not break. If you're about to add a
 > feature, skim "Invariants" first — most bugs in a project like this come from
 > quietly violating one of them.
 
-Doujin Bunko is a single-user, offline, local web app that indexes a manga collection
+Doujin Toshokan is a single-user, offline, local web app that indexes a manga collection
 **in place** and serves it as a searchable library and a scrollable reader. It
 never moves, renames, or deletes your files.
 

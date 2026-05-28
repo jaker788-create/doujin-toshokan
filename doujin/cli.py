@@ -35,7 +35,7 @@ def main() -> None:
     cfg = load_config(data_dir)
     app = create_app(data_dir)
     url = f"http://127.0.0.1:{cfg.port}"
-    print(f"Doujin Bunko running at {url}  (data dir: {data_dir})")
+    print(f"Doujin Toshokan running at {url}  (data dir: {data_dir})")
     if not cfg.library_roots:
         print(
             "No library roots configured yet. Edit "

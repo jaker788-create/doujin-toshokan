@@ -25,7 +25,7 @@ def create_app(data_dir: Path) -> FastAPI:
     init_db(conn0)
     conn0.close()
 
-    app = FastAPI(title="Doujin Bunko")
+    app = FastAPI(title="Doujin Toshokan")
     app.state.data_dir = data_dir
     templates = Jinja2Templates(directory=str(_HERE / "templates"))
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")

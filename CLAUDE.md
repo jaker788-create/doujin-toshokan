@@ -1,13 +1,13 @@
 # CLAUDE.md - Claude Code Instructions
 
-> **Project**: Doujin Bunko
+> **Project**: Doujin Toshokan
 > **Created**: 2026-05-27
 
 ---
 
 ## Project
 
-Doujin Bunko is a local, offline, single-user manga library and viewer. It indexes a
+Doujin Toshokan is a local, offline, single-user manga library and viewer. It indexes a
 collection of `author/title/*.images` folders on disk, lets you search and
 filter by title, author, and tags, and read titles as a scrollable image
 gallery — without ever moving your files (index-in-place).

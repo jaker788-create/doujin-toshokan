@@ -1,7 +1,7 @@
 [project]
 name = "doujin"
 version = "0.1.0"
-description = "Doujin Bunko — a local, offline manga library and viewer"
+description = "Doujin Toshokan — a local, offline manga library and viewer"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110",

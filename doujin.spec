@@ -1,4 +1,4 @@
-# PyInstaller spec for Doujin Bunko.
+# PyInstaller spec for Doujin Toshokan.
 #
 # Build with:  pyinstaller doujin.spec
 # Output:      dist/doujin.exe (Windows) / dist/doujin (macOS, Linux)
