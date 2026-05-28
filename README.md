@@ -3,4 +3,15 @@ Doujin Toshokan is an app to organize all the digital doujin/manga you've accumu
 Heads up: this is a personal project and a crude early build. It's not meant to be a complete or "official" release — but there's no harm in it being public. Wanna contribute? Go for it. This is a FAFO project.
 
 Bundled release for ARM64 https://github.com/jaker788-create/doujin-toshokan/releases/tag/v0.2.0
-There is no bundled x86-64 release, but the source can be ran anywhere with the python dependancies installed
+There is no bundled x86-64 release, but the source can be ran anywhere with the python dependancies installed. You'll need Python 3.11+ and git. From PowerShell:
+
+```powershell
+git clone https://github.com/jaker788-create/doujin-toshokan.git
+cd doujin-toshokan
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install .
+doujin
+```
+
+On macOS or Linux, swap the activate step for `source .venv/bin/activate`. First launch creates a config file (Windows: `%APPDATA%\doujin\config.json`) — set `library_roots` to the folders your collection lives in, e.g. `["C:\\Manga"]`, and run `doujin` again. The library opens at http://127.0.0.1:8765.
