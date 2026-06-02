@@ -37,6 +37,9 @@ migration ladder) — read it before adding a feature.
 - Schema changes: append a migration to `MIGRATIONS` in `doujin/db.py`; never
   edit an existing migration (see `docs/ARCHITECTURE.md`).
 - Lint/format clean before committing (`ruff check`, `ruff format`).
+- Definition of done (every feature): (1) `pytest` green, (2) `ruff check` +
+  `ruff format` clean, (3) rebuild `dist/doujin.exe` so the shipped binary
+  matches source. Steps 1–2 gate the commit; step 3 keeps the artifact current.
 
 ## Commands
 
@@ -44,5 +47,9 @@ migration ladder) — read it before adding a feature.
 - Test: `pytest` (or `.venv/Scripts/python.exe -m pytest`)
 - Lint: `.venv/Scripts/python.exe -m ruff check doujin tests`
 - Format: `.venv/Scripts/python.exe -m ruff format doujin tests`
+- Build: `.venv/Scripts/python.exe -m PyInstaller --noconfirm --clean doujin.spec`
+  → single-file `dist/doujin.exe` (ARM64 Windows). `--clean` is required so the
+  bundled `templates/` + `static/` (shipped as data files) are re-collected and
+  never stale; without it edited assets can re-ship from PyInstaller's cache.
 - Config: `%APPDATA%/doujin/config.json` — set `library_roots` (list of paths)
   and optionally `port` (default 8765)
