@@ -191,6 +191,20 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
             },
         )
 
+    @app.post("/manga/{manga_id}/tags")
+    def update_tags(manga_id: int, tags: str = Form(""), conn=Depends(get_conn)):
+        # 404 on an unknown id so a stale page can't create a tag set for a
+        # manga row that no longer exists.
+        if search.get_manga(conn, manga_id) is None:
+            raise HTTPException(status_code=404, detail="not found")
+        # Same comma-split as /ingest: trim each token, drop blanks. Normalizing
+        # and de-duping happen inside set_manga_tags.
+        tag_list = [t for t in (s.strip() for s in tags.split(",")) if t]
+        ingest.set_manga_tags(conn, manga_id, tag_list)
+        # Redirect back to the title page so the no-JS path reloads with the new
+        # tags; app.js hijacks the submit to update the chips in place instead.
+        return RedirectResponse(url=f"/manga/{manga_id}", status_code=303)
+
     @app.get("/scan", response_class=HTMLResponse)
     def scan_page(request: Request, conn=Depends(get_conn)):
         known = {r["folder_path"] for r in conn.execute("SELECT folder_path FROM manga")}

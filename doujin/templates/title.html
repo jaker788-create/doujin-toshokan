@@ -6,9 +6,17 @@
 <header class="title-header">
   <h1>{{ m['title'] }}</h1>
   <p class="byline">by <span class="author">{{ m['author_name'] }}</span><span class="sep">·</span>{{ m['page_count'] }} pages</p>
-  {% if tags %}
-  <p class="tagrow">{% for t in tags %}<a href="/?tag={{ t }}">#{{ t }}</a>{% endfor %}</p>
-  {% endif %}
+  <div class="tags-block" data-manga="{{ m['id'] }}">
+    <p class="tagrow" id="tagrow">{% for t in tags %}<a href="/?tag={{ t | urlencode }}">#{{ t }}</a>{% endfor %}</p>
+    <form class="tag-edit" method="post" action="/manga/{{ m['id'] }}/tags" hidden>
+      <input class="tag-input" name="tags" value="{{ tags | join(', ') }}" placeholder="comma, separated, tags" autocomplete="off">
+      <div class="tag-edit-actions">
+        <button type="submit" class="btn btn-primary">Save tags</button>
+        <button type="button" class="btn tag-edit-cancel">Cancel</button>
+      </div>
+    </form>
+    <button type="button" class="tag-edit-toggle btn">{% if tags %}Edit tags{% else %}+ Add tags{% endif %}</button>
+  </div>
   {% if missing %}<p class="notice">Folder is missing on disk: {{ m['folder_path'] }}</p>{% endif %}
 </header>
 

@@ -136,6 +136,15 @@ everything.
 disk) → `title.html` renders the gallery; each page is an `<img>` pointing at
 `/image`, covers use `/thumb`. Click an image for a lightbox.
 
+**Edit tags.** The title page carries an inline tag editor. `POST
+/manga/{id}/tags` (form field `tags`, comma-separated) → `ingest.set_manga_tags`,
+which *replaces* the title's tag set in one transaction (delete its `manga_tags`
+rows, re-insert the normalized + de-duped list) and 303-redirects back. This only
+writes the DB — the library files stay untouched (invariant 1). `app.js` hijacks
+the submit to re-render the chip row in place and toast; with JS off the redirect
+reloads the page showing the new tags. Tag rows that fall out of use are left in
+`tags` on purpose — they keep autocomplete useful and there is no GC pass.
+
 **Ingest.** `GET /scan` lists folders on disk not yet in the DB
 (`scanner.find_unimported`). `POST /ingest` imports one (confirm-each, with
 manual author/title/tags). `GET/POST /import-all` bulk-imports everything found,
