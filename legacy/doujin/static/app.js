@@ -293,6 +293,70 @@ document.querySelectorAll(".gallery img").forEach((img, i) => {
   img.addEventListener("click", () => openLightbox(i));
 });
 
+// ───── Tag editor (title page) ────────────────────────────────────
+// Toggle reveals an inline form prefilled with the current tags. Submit
+// posts over XHR and re-renders the chip row in place; the .tag-input gets
+// autocomplete for free from the generic binding above. With JS off the form
+// still posts and the 303 reloads the page showing the new tags.
+const tagsBlock = document.querySelector(".tags-block");
+if (tagsBlock) {
+  const toggle = tagsBlock.querySelector(".tag-edit-toggle");
+  const form = tagsBlock.querySelector(".tag-edit");
+  const cancel = tagsBlock.querySelector(".tag-edit-cancel");
+  const input = tagsBlock.querySelector(".tag-input");
+  const row = tagsBlock.querySelector("#tagrow");
+
+  function openEditor() {
+    form.hidden = false;
+    toggle.hidden = true;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  function closeEditor() {
+    form.hidden = true;
+    toggle.hidden = false;
+  }
+
+  // Mirror the server's normalization (ingest.normalize_tag + dedupe + sort) so
+  // the optimistic re-render matches what /manga/{id}/tags actually stored.
+  function normalizeTags(raw) {
+    const seen = [];
+    raw.split(",").map((t) => t.trim().toLowerCase()).forEach((t) => {
+      if (t && !seen.includes(t)) seen.push(t);
+    });
+    return seen.sort();
+  }
+
+  toggle?.addEventListener("click", openEditor);
+  cancel?.addEventListener("click", closeEditor);
+
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector("button[type=submit]");
+    btn?.setAttribute("disabled", "true");
+    try {
+      const fd = new FormData(form);
+      const res = await fetch(form.action, { method: "POST", body: fd, redirect: "manual" });
+      // 303 redirect = success; opaqueredirect/0 also count (manual redirect).
+      if (!(res.type === "opaqueredirect" || res.ok || res.status === 303 || res.status === 0)) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const tags = normalizeTags(input.value);
+      input.value = tags.join(", ");
+      row.innerHTML = tags
+        .map((t) => `<a href="/?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`)
+        .join("");
+      toggle.textContent = tags.length ? "Edit tags" : "+ Add tags";
+      closeEditor();
+      toast("Tags saved");
+    } catch (_e) {
+      toast("Couldn't save tags", "err");
+    } finally {
+      btn?.removeAttribute("disabled");
+    }
+  });
+}
+
 // ───── Scan / Ingest form hijack ──────────────────────────────────
 // Each ingest row submits over XHR so we can fade the row out and toast
 // without a full page reload. Falls back to the native submit on error.

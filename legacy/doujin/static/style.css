@@ -305,6 +305,20 @@ header .nav-spacer { margin-left: auto; }
   transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
 .tagrow a:hover { color: var(--vermilion); border-color: var(--vermilion); }
+.tags-block { margin-top: var(--s-3); }
+.tags-block .tagrow:empty { display: none; }
+.tag-edit-toggle { margin-top: var(--s-3); }
+.tag-edit[hidden] { display: none; }
+.tag-edit { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; margin-top: var(--s-3); }
+.tag-edit .tag-input {
+  flex: 1 1 320px; min-width: 0;
+  background: var(--ink-1); border: 1px solid var(--rule-strong); border-radius: var(--r-2);
+  color: var(--paper); font-family: var(--font-mono); font-size: var(--step--1);
+  padding: var(--s-3) var(--s-4);
+}
+.tag-edit .tag-input::placeholder { color: var(--paper-mute); font-style: italic; }
+.tag-edit .tag-input:focus { border-color: var(--vermilion); box-shadow: 0 0 0 3px var(--vermilion-soft); outline: none; }
+.tag-edit-actions { display: flex; gap: var(--s-2); }
 .notice {
   font-family: var(--font-mono); font-size: var(--step--1);
   color: var(--paper-2);
