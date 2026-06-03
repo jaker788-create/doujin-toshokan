@@ -75,10 +75,31 @@ func Open(path string) (*sql.DB, error) {
 // (not const) so white-box tests can extend it.
 var migrations = []func(*sql.Tx) error{
 	migrate001Initial,
+	migrate002Stash,
 }
 
 func migrate001Initial(tx *sql.Tx) error {
 	_, err := tx.Exec(schema)
+	return err
+}
+
+// migrate002Stash adds the stash table: a persisted list of saved "pages" (browser-
+// tab-like navigation states). A row is either a saved search (kind='search', the
+// route hash captures its filters) or a saved title (kind='title', manga_id set,
+// last_page records the resume point). No UNIQUE constraint — cloning or
+// opening-in-a-new-tab intentionally creates independent rows, each with its own
+// last_page. ON DELETE CASCADE drops a title's saved pages if the manga is removed.
+func migrate002Stash(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS stash (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    hash       TEXT NOT NULL,
+    label      TEXT NOT NULL,
+    manga_id   INTEGER REFERENCES manga(id) ON DELETE CASCADE,
+    last_page  INTEGER NOT NULL DEFAULT 0,
+    date_added TEXT NOT NULL
+);`)
 	return err
 }
 

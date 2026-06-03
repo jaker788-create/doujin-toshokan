@@ -13,6 +13,7 @@ import (
 	"doujin/internal/ingest"
 	"doujin/internal/scanner"
 	"doujin/internal/search"
+	"doujin/internal/stash"
 	"doujin/internal/store"
 )
 
@@ -355,4 +356,60 @@ func (a *App) RemoveLibraryRoot(path string) error {
 	}
 	cfg.LibraryRoots = kept
 	return config.Save(cfg, a.dataDir)
+}
+
+// ── Stash: saved pages ("tabs") ────────────────────────────────────────────
+
+// StashInput is the create payload for a saved page. Kind is "search" or "title";
+// Hash is the route to restore (e.g. "/?author=3&tag=x" or "/manga/5"); MangaID 0
+// means "no manga" (a search) and is stored as NULL. Page is the initial resume
+// point for a title.
+type StashInput struct {
+	Kind    string `json:"kind"`
+	Hash    string `json:"hash"`
+	Label   string `json:"label"`
+	MangaID int64  `json:"manga_id"`
+	Page    int    `json:"page"`
+}
+
+// StashSave persists a page and returns its new id. Save, clone, and open-in-new-tab
+// all funnel here — each call is an independent row (duplicates are intentional).
+func (a *App) StashSave(in StashInput) (int64, error) {
+	e := stash.Entry{
+		Kind:     in.Kind,
+		Hash:     in.Hash,
+		Label:    in.Label,
+		LastPage: in.Page,
+	}
+	if in.MangaID != 0 {
+		id := in.MangaID
+		e.MangaID = &id
+	}
+	return stash.Add(a.db, e)
+}
+
+// StashList returns every saved page, newest first, with title rows enriched by their
+// manga (cover/title/author) for the Stash screen's cards.
+func (a *App) StashList() ([]stash.Entry, error) {
+	return stash.List(a.db)
+}
+
+// StashGet returns one saved page by id (or null), used by the reader to find a title
+// tab's resume point.
+func (a *App) StashGet(id int64) (*stash.Entry, error) {
+	return stash.Get(a.db, id)
+}
+
+// StashSetPage records the page reached in a saved title tab, so reopening it resumes
+// where the user left off. Unknown ids are a no-op.
+func (a *App) StashSetPage(id int64, page int) error {
+	if page < 0 {
+		page = 0
+	}
+	return stash.SetPage(a.db, id, page)
+}
+
+// StashRemove deletes a saved page.
+func (a *App) StashRemove(id int64) error {
+	return stash.Remove(a.db, id)
 }

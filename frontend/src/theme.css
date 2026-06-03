@@ -119,6 +119,7 @@ header .nav-spacer { margin-left: auto; }
   background: transparent; border: 1px solid var(--rule-strong); color: var(--paper-2);
   width: 36px; height: 36px; padding: 0; cursor: pointer; border-radius: var(--r-2);
   display: inline-flex; align-items: center; justify-content: center;
+  text-decoration: none;
   transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
 .icon-btn:hover { color: var(--vermilion); border-color: var(--vermilion); background: var(--vermilion-soft); }
@@ -408,6 +409,77 @@ body[data-fit="height"] .gallery img { max-height: 92vh; width: auto; max-width:
 .lightbox .lb-prev { left: var(--s-5); }
 .lightbox .lb-next { right: var(--s-5); }
 .lightbox .lb-close:hover, .lightbox .lb-nav:hover { color: var(--vermilion); border-color: var(--vermilion); background: var(--vermilion-soft); }
+
+/* ───── Stash (saved pages) ───── */
+/* Search cards sit in the same .grid as title cards; give them a bordered panel
+   look so the mixed grid still reads as a set of saved "tabs". */
+.stash-card.search {
+  position: relative;
+  border: 1px solid var(--rule-strong); border-radius: var(--r-2);
+  background: var(--ink-1);
+  min-height: 120px;
+  display: flex;
+}
+.stash-card.search .stash-card-main {
+  display: flex; flex-direction: column; gap: var(--s-3);
+  text-decoration: none; color: inherit; padding: var(--s-4); width: 100%;
+  transition: border-color var(--dur-1) var(--ease);
+}
+.stash-card.search:hover { border-color: var(--vermilion); }
+.stash-eyebrow {
+  font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: var(--tracking-wide); text-transform: uppercase;
+  color: var(--paper-mute);
+}
+.stash-chips { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: flex-start; }
+.stash-allvol { font-family: var(--font-display); font-style: italic; color: var(--paper-2); }
+
+/* Title stash cards reuse .card; just anchor the resume hint + remove button. */
+.stash-card .resume-hint {
+  position: absolute; left: var(--s-2); bottom: var(--s-2); z-index: 2;
+  background: var(--ink-0); color: var(--vermilion); border: 1px solid var(--vermilion);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: var(--tracking-wide);
+  text-transform: uppercase; padding: 2px var(--s-2); border-radius: var(--r-1);
+}
+.stash-remove {
+  position: absolute; top: var(--s-2); right: var(--s-2); z-index: 3;
+  width: 24px; height: 24px; padding: 0; cursor: pointer; line-height: 1;
+  background: var(--ink-0); border: 1px solid var(--rule-strong); border-radius: var(--r-1);
+  color: var(--paper-2); font-family: var(--font-mono); font-size: var(--step-0);
+  opacity: 0; transition: opacity var(--dur-1) var(--ease), color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.stash-card:hover .stash-remove, .stash-remove:focus-visible { opacity: 1; }
+.stash-remove:hover { color: var(--vermilion); border-color: var(--vermilion); }
+.empty .inline-ico { color: var(--vermilion); font-style: normal; }
+
+/* Resume pill (reader): like the help hint, but a clickable button. */
+.resume-pill {
+  position: fixed; bottom: calc(var(--s-5) + 44px); right: var(--s-5); z-index: 41;
+  background: var(--ink-1); border: 1px solid var(--vermilion); border-radius: var(--r-2);
+  padding: var(--s-2) var(--s-4); cursor: pointer;
+  font-family: var(--font-mono); font-size: var(--step--1);
+  letter-spacing: var(--tracking-wide); color: var(--paper);
+  box-shadow: 0 12px 32px -16px rgba(0, 0, 0, .8);
+  opacity: 0; transform: translateY(6px);
+  transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease), background var(--dur-1) var(--ease);
+}
+.resume-pill.visible { opacity: 1; transform: translateY(0); }
+.resume-pill:hover { background: var(--vermilion-soft); }
+
+/* Card context menu ("open in new tab") */
+.card-menu {
+  position: absolute; z-index: 120;
+  background: var(--ink-1); border: 1px solid var(--rule-strong); border-radius: var(--r-2);
+  box-shadow: 0 16px 40px -20px rgba(0, 0, 0, .85);
+  padding: var(--s-1); min-width: 160px;
+}
+.card-menu button {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: 0; cursor: pointer; border-radius: var(--r-1);
+  color: var(--paper); font-family: var(--font-mono); font-size: var(--step--1);
+  letter-spacing: 0.02em; padding: var(--s-2) var(--s-3);
+}
+.card-menu button:hover { background: var(--vermilion-soft); color: var(--paper); }
 
 /* ───── Scan page ───── */
 .scan-header { margin-bottom: var(--s-6); display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-4); flex-wrap: wrap; }
