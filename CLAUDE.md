@@ -25,13 +25,27 @@ frontend (no framework).
 - `main.go` — Wails entry: window options, embeds `frontend/dist`, wires the bound methods + the asset handler.
 - `app.go` — the `App` struct; its **exported methods are the frontend JSON API** (Wails generates typed TS bindings under `frontend/wailsjs/`).
 - `assets.go` — the `/image` + `/thumb` HTTP handler (path-guarded) that serves library files to `<img>` tags.
-- `internal/` — backend packages: `config`, `store` (db + migrations), `scanner`, `ingest`, `search`, `thumbs`, `paths`.
-- `frontend/src/` — the TypeScript SPA (`main.ts`) + `theme.css`. `frontend/public/` holds fonts + the noise texture; `frontend/wailsjs/` is generated bindings.
+- `internal/` — backend packages: `config`, `store` (db + migrations), `scanner`, `ingest`, `search`, `thumbs`, `paths`, `stash` (saved pages — see below).
+- `frontend/src/` — the TypeScript SPA (`main.ts`) + `theme.css`. It's a **hash-based router with no framework**: all view state lives in the URL hash (`#/`, `#/manga/{id}`, `#/stash`, `#/scan`), so a "page" is just a hash string. `frontend/public/` holds fonts + the noise texture; `frontend/wailsjs/` is **generated bindings — never hand-edit; `wails build`/`wails generate module` regenerate them from `app.go`'s exported methods**.
 - `build/` — Wails build config (icons, manifests, NSIS installer template).
 
 Metadata (authors, titles, tags, page counts, paths) lives in SQLite at
 `%APPDATA%/doujin/doujin.db`, opened in place. Thumbnails are disk-cached in
 `%APPDATA%/doujin/thumbs/`. No files in the library are ever moved or modified.
+
+**Stash (saved pages / "tabs"):** the `stash` table + `internal/stash` persist
+navigation states a user saves for later. A saved page is just **a hash + a label +
+a kind** (`search` or `title`); title entries also carry `manga_id` + `last_page` so
+each behaves like an independent tab with its own resume position. Save / clone /
+open-in-new-tab all funnel through the one `StashSave` create primitive.
+
+**Dependencies (and why):** the manifests (`go.mod`/`go.sum`, `frontend/package.json`/
+`package-lock.json`) are the source of truth — there is intentionally **no** separate
+dependency index to drift. The four *direct* Go deps: `wailsapp/wails/v2` (desktop
+shell + WebView2 + binding generation), `modernc.org/sqlite` (pure-Go SQLite, **no
+cgo** — the reason builds are toolchain-free), `disintegration/imaging` +
+`golang.org/x/image` (thumbnail decode/resize). Frontend: `typescript` + `vite` only
+(no UI framework). Everything else in `go.mod` is indirect.
 
 **See `docs/ARCHITECTURE.md`** for the load-bearing invariants (index-in-place,
 the `search.SearchManga` read chokepoint, the path-traversal guard, the migration
