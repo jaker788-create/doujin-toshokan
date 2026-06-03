@@ -56,6 +56,7 @@ type SearchParams struct {
 	AuthorID int64
 	TagIDs   []int64
 	Sort     string
+	Seed     int64 // only used when Sort == "random"; selects one stable shuffle
 	Limit    int
 	Offset   int
 }
@@ -119,11 +120,23 @@ func SearchManga(q store.Querier, p SearchParams) ([]Manga, error) {
 		parts = append(parts, "GROUP BY m.id HAVING COUNT(DISTINCT mt.tag_id) = ?")
 		args = append(args, len(p.TagIDs))
 	}
-	order := sorts[p.Sort]
-	if order == "" {
-		order = "m.title"
+	if p.Sort == "random" {
+		// Seeded, stable shuffle: each row gets a fixed key for a given seed, so
+		// LIMIT/OFFSET paging stays consistent across pages (a naive RANDOM()
+		// re-rolls per query and dupes/drops rows as you scroll). A new seed yields
+		// a new order. The ORDER BY text is a constant — only the seed is a bound
+		// arg — so the no-interpolation sort invariant holds. "random" is kept OUT
+		// of the sorts allow-list on purpose so unknown sorts still fall back to
+		// m.title.
+		parts = append(parts, "ORDER BY ((m.id + ?) * 1103515245) % 2147483647")
+		args = append(args, p.Seed)
+	} else {
+		order := sorts[p.Sort]
+		if order == "" {
+			order = "m.title"
+		}
+		parts = append(parts, "ORDER BY "+order)
 	}
-	parts = append(parts, "ORDER BY "+order)
 	if p.Limit > 0 {
 		parts = append(parts, "LIMIT ? OFFSET ?")
 		args = append(args, p.Limit, p.Offset)

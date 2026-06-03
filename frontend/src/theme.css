@@ -199,8 +199,17 @@ header .nav-spacer { margin-left: auto; }
 .builder-foot { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin-top: var(--s-4); }
 .builder-chips { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; }
 .builder-chips:empty { display: none; }
+/* Shuffle owns the auto-margin so it + the sort control cluster on the right. */
+.builder-shuffle { margin-left: auto; display: inline-flex; align-items: center; }
+.builder-shuffle svg {
+  width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6;
+  vertical-align: -2px; margin-right: var(--s-2);
+}
+.builder-shuffle.is-on {
+  background: var(--vermilion); color: var(--paper); border-color: var(--vermilion);
+}
+.builder-shuffle.is-on:hover { background: #b1432d; border-color: #b1432d; color: var(--paper); }
 .builder-sortwrap {
-  margin-left: auto;
   display: inline-flex; align-items: center; gap: var(--s-2);
   font-family: var(--font-mono); font-size: var(--step--1);
   letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--paper-mute);
@@ -306,6 +315,25 @@ header .nav-spacer { margin-left: auto; }
   transition: color var(--dur-1) var(--ease); cursor: pointer;
 }
 .back-link:hover { color: var(--vermilion); }
+
+/* Floating back icon: compact, out-of-the-way fixed overlay for long galleries.
+   Hidden when idle; surfaced (faint) by scroll activity, full opacity near the top
+   edge or on hover. Visibility is driven by classes from renderReader. */
+.reader-back {
+  position: fixed; top: var(--s-5); left: var(--s-5); z-index: 41;
+  width: 36px; height: 36px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--ink-1); border: 1px solid var(--rule-strong); border-radius: var(--r-2);
+  color: var(--paper-2); text-decoration: none;
+  box-shadow: 0 12px 32px -16px rgba(0, 0, 0, .8);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease), color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.reader-back svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.reader-back.visible { opacity: .3; pointer-events: auto; }
+.reader-back.visible.near, .reader-back.visible:hover, .reader-back:focus-visible {
+  opacity: 1; color: var(--paper); border-color: var(--vermilion);
+}
 .title-header { margin-bottom: var(--s-7); max-width: 900px; margin-inline: auto; }
 .title-header h1 {
   font-family: var(--font-display); font-weight: 600;

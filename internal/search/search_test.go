@@ -122,6 +122,74 @@ func TestSortByDateDesc(t *testing.T) {
 	}
 }
 
+func TestSortRandomSeeded(t *testing.T) {
+	db := newDB(t)
+	// Enough rows that distinct seeds reliably produce distinct orderings.
+	names := []string{"Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"}
+	want := map[string]bool{}
+	for _, name := range names {
+		if _, err := ingest.IngestManga(db, ingest.MangaInput{
+			Title: name, Author: name + "-author", FolderPath: "/" + name, PageCount: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		want[name] = true
+	}
+
+	// A given seed is stable across calls.
+	a1, err := SearchManga(db, SearchParams{Sort: "random", Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, _ := SearchManga(db, SearchParams{Sort: "random", Seed: 42})
+	if !eq(titles(a1), titles(a2)) {
+		t.Errorf("same seed not stable:\n %v\n %v", titles(a1), titles(a2))
+	}
+
+	// The shuffle is a permutation of the full set: no dupes, nothing dropped.
+	if len(a1) != len(want) {
+		t.Fatalf("random returned %d rows, want %d", len(a1), len(want))
+	}
+	seen := map[string]bool{}
+	for _, m := range a1 {
+		if seen[m.Title] {
+			t.Errorf("duplicate %q in shuffle", m.Title)
+		}
+		seen[m.Title] = true
+		if !want[m.Title] {
+			t.Errorf("unexpected title %q", m.Title)
+		}
+	}
+	if len(seen) != len(want) {
+		t.Errorf("shuffle covered %d titles, want %d", len(seen), len(want))
+	}
+
+	// Paging with a fixed seed is consistent: concatenated pages equal the full
+	// order (no dupes/gaps across LIMIT/OFFSET, which a naive RANDOM() would break).
+	var paged []string
+	for off := 0; off < len(names); off += 3 {
+		pg, _ := SearchManga(db, SearchParams{Sort: "random", Seed: 42, Limit: 3, Offset: off})
+		paged = append(paged, titles(pg)...)
+	}
+	if !eq(paged, titles(a1)) {
+		t.Errorf("paged shuffle != full shuffle:\n paged %v\n full  %v", paged, titles(a1))
+	}
+
+	// Different seeds reorder: at least one other seed differs from seed 42's order.
+	base := titles(a1)
+	differs := false
+	for _, s := range []int64{1, 2, 3, 7, 99, 12345} {
+		other, _ := SearchManga(db, SearchParams{Sort: "random", Seed: s})
+		if !eq(titles(other), base) {
+			differs = true
+			break
+		}
+	}
+	if !differs {
+		t.Error("no seed produced a different order; shuffle isn't seed-sensitive")
+	}
+}
+
 func TestSuggestTagsPrefix(t *testing.T) {
 	db := newDB(t)
 	seed(t, db)

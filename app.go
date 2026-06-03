@@ -110,6 +110,7 @@ type SearchArgs struct {
 	AuthorID int64    `json:"author_id"`
 	Tags     []string `json:"tags"`
 	Sort     string   `json:"sort"`
+	Seed     int64    `json:"seed"` // only used when Sort == "random"
 	Limit    int      `json:"limit"`
 	Offset   int      `json:"offset"`
 }
@@ -144,6 +145,7 @@ func (a *App) Search(args SearchArgs) ([]search.Manga, error) {
 		AuthorID: args.AuthorID,
 		TagIDs:   tagIDs,
 		Sort:     args.Sort,
+		Seed:     args.Seed,
 		Limit:    limit,
 		Offset:   offset,
 	})

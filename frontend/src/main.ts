@@ -74,6 +74,7 @@ interface Filter {
     authorName: string;
     tags: string[];
     sort: string;
+    seed: string; // only set when sort === 'random'; pins one stable shuffle
 }
 
 // ───── router ─────────────────────────────────────────────────────
@@ -119,10 +120,15 @@ async function render(): Promise<void> {
     else window.scrollTo(0, 0);
 }
 
+// A fresh shuffle seed in [0, 2^31). Kept below 2^31 so the backend's seeded
+// order key ((id + seed) * C) stays well within int64.
+function newSeed(): string { return String(Math.floor(Math.random() * 2147483647)); }
+
 function navigateToFilter(f: Filter): void {
     const p = new URLSearchParams();
     if (f.titleText) p.set('q', f.titleText);
     p.set('sort', f.sort);
+    if (f.sort === 'random' && f.seed) p.set('seed', f.seed);
     if (f.authorId) p.set('author', f.authorId);
     f.tags.filter(Boolean).forEach((t) => p.append('tag', t));
     const target = '#/?' + p.toString();
@@ -167,6 +173,9 @@ function libraryMarkup(total: number, sort: string): string {
         </div>
         <div class="builder-foot">
             <div class="builder-chips" aria-live="polite"></div>
+            <button type="button" class="btn builder-shuffle${sort === 'random' ? ' is-on' : ''}" aria-pressed="${sort === 'random'}" title="Shuffle results">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>Shuffle
+            </button>
             <label class="builder-sortwrap">Sort by
                 <select class="builder-sort" aria-label="Sort by">
                     <option value="title"${sel('title')}>Title</option>
@@ -187,7 +196,11 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
         authorName: '',
         tags: params.getAll('tag').filter(Boolean),
         sort: params.get('sort') || 'title',
+        seed: params.get('seed') || '',
     };
+    // A 'random' route must carry a seed so every infinite-scroll page (and a
+    // scroll-restore on return) sees the same shuffle; mint one if absent.
+    if (filter.sort === 'random' && !filter.seed) filter.seed = newSeed();
     if (filter.authorId) {
         filter.authorName = authorNames[filter.authorId] || '';
         if (!filter.authorName) {
@@ -232,6 +245,7 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
                 author_id: filter.authorId ? parseInt(filter.authorId, 10) : 0,
                 tags: filter.tags,
                 sort: filter.sort,
+                seed: filter.seed ? parseInt(filter.seed, 10) : 0,
                 limit: PAGE_SIZE,
                 offset,
             });
@@ -403,7 +417,15 @@ function wireBuilder(filter: Filter): void {
         navigateToFilter(filter);
     }
     runBtn.addEventListener('click', () => { commit(); });
-    sortSel.addEventListener('change', () => { filter.sort = sortSel.value; commit(); });
+    // Picking an explicit sort exits shuffle (drop the seed so it leaves the URL).
+    sortSel.addEventListener('change', () => { filter.sort = sortSel.value; filter.seed = ''; commit(); });
+    // Shuffle: switch to random and mint a fresh seed. Clicking again re-rolls.
+    const shuffleBtn = builder.querySelector('.builder-shuffle') as HTMLButtonElement;
+    shuffleBtn.addEventListener('click', () => {
+        filter.sort = 'random';
+        filter.seed = newSeed();
+        commit();
+    });
 }
 
 // ───── reader view ────────────────────────────────────────────────
@@ -414,11 +436,12 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
         `<img loading="lazy" src="${imageURL(p)}" alt="page ${i + 1}" data-page="${i + 1}">`).join('');
     const counter = d.pages.length
         ? `<div class="reader-counter" data-total="${d.pages.length}"><span class="cur">1</span><span class="sep">/</span><span class="tot">${d.pages.length}</span></div>
-           <aside class="reader-help"><kbd>←</kbd><kbd>→</kbd> page · <kbd>F</kbd> fit · <kbd>Esc</kbd> close</aside>`
+           <aside class="reader-help"><kbd>←</kbd><kbd>→</kbd> page · <kbd>F</kbd> fit · <kbd>⌫</kbd> back</aside>`
         : '';
     const notice = d.missing ? `<p class="notice">Folder is missing on disk: ${esc(m.folder_path)}</p>` : '';
     return `
     <a class="back-link" href="${esc(backHref)}">${esc(backLabel)}</a>
+    <a class="reader-back" href="${esc(backHref)}" aria-label="${esc(backLabel)}" title="${esc(backLabel)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></a>
     <header class="title-header">
         <h1>${esc(m.title)}</h1>
         <p class="byline">by <a class="author author-link" href="#/?author=${m.author_id}" data-author-name="${esc(m.author_name)}">${esc(m.author_name)}</a><span class="sep">·</span>${m.page_count} pages</p>
@@ -538,6 +561,34 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     const onScrollOnce = () => showHelp();
     window.addEventListener('scroll', onScrollOnce, { once: true, passive: true });
 
+    // Floating back icon: stays out of the way. It surfaces only while you're
+    // actively scrolling (then fades a couple seconds after you stop) or while the
+    // mouse is near the top edge. Faint by default, full opacity near the top/hover.
+    const backFloat = viewEl().querySelector('.reader-back') as HTMLElement | null;
+    let nearTop = false;
+    let hideTimer: number | undefined;
+    const setShown = (on: boolean) => {
+        if (backFloat && backFloat.classList.contains('visible') !== on) {
+            backFloat.classList.toggle('visible', on);
+        }
+    };
+    // After scroll activity stops, fade out — unless the mouse is holding it open.
+    const armHide = () => {
+        window.clearTimeout(hideTimer);
+        hideTimer = window.setTimeout(() => { if (!nearTop) setShown(false); }, 2500);
+    };
+    const onBackScroll = () => { setShown(true); armHide(); };
+    const onBackMouse = (e: MouseEvent) => {
+        const near = e.clientY < 120;
+        if (near === nearTop) return;
+        nearTop = near;
+        backFloat?.classList.toggle('near', near);
+        if (near) { window.clearTimeout(hideTimer); setShown(true); }
+        else armHide(); // mouse left the top zone: fade unless scrolling resumes
+    };
+    window.addEventListener('scroll', onBackScroll, { passive: true });
+    window.addEventListener('mousemove', onBackMouse, { passive: true });
+
     const onKey = (e: KeyboardEvent) => {
         if (document.querySelector('.lightbox')) return;
         const t = e.target as HTMLElement | null;
@@ -551,6 +602,11 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
             if (document.body.dataset.fit === 'height') delete document.body.dataset.fit;
             else document.body.dataset.fit = 'height';
             showHelp();
+        } else if (e.key === 'Backspace') {
+            // Return to the list/results. preventDefault stops the WebView's own
+            // history-back; the input/lightbox guards above keep tag-editing safe.
+            e.preventDefault();
+            location.hash = backHref;
         }
     };
     document.addEventListener('keydown', onKey);
@@ -561,6 +617,9 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     viewCleanup = () => {
         document.removeEventListener('keydown', onKey);
         window.removeEventListener('scroll', onScrollOnce);
+        window.removeEventListener('scroll', onBackScroll);
+        window.removeEventListener('mousemove', onBackMouse);
+        window.clearTimeout(hideTimer);
         io?.disconnect();
         window.clearTimeout(saveTimer);
         // Flush the final page so leaving mid-scroll doesn't lose the last move.

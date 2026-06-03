@@ -60,6 +60,7 @@ export namespace main {
 	    author_id: number;
 	    tags: string[];
 	    sort: string;
+	    seed: number;
 	    limit: number;
 	    offset: number;
 	
@@ -73,6 +74,7 @@ export namespace main {
 	        this.author_id = source["author_id"];
 	        this.tags = source["tags"];
 	        this.sort = source["sort"];
+	        this.seed = source["seed"];
 	        this.limit = source["limit"];
 	        this.offset = source["offset"];
 	    }
