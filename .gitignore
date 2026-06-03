@@ -4,9 +4,14 @@ __pycache__/
 *.pyc
 doujin.egg-info/
 
-# PyInstaller build artifacts (doujin.spec IS committed; build/ and dist/ are not)
-build/
+# PyInstaller build artifacts (being retired; doujin.spec committed, outputs are not)
+build/doujin/
 dist/
+
+# Go / Wails: commit build/ config (icons, manifests, nsis) but NOT the compiled output
+build/bin/
+node_modules/
+frontend/dist/
 
 # Runtime data (kept outside the repo anyway; here as a safety net)
 .doujin/
