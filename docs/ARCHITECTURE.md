@@ -13,8 +13,8 @@ reader. It never moves, renames, or deletes your files.
 WebView2 window), SQLite via `modernc.org/sqlite` (pure Go, no cgo),
 `disintegration/imaging` for thumbnails, TypeScript + Vite frontend (no framework).
 
-> The original Python/FastAPI build is retained under `doujin/` as a fallback and
-> reads the same database; it is not the active codebase. See CLAUDE.md.
+> The original Python/FastAPI build is archived under `legacy/` and reads the same
+> database; it is not the active codebase. See CLAUDE.md.
 
 ---
 

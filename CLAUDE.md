@@ -68,8 +68,8 @@ fresh shell can't find them, prepend both to `PATH`.
 
 ## Legacy Python implementation
 
-The original FastAPI / Jinja / Pillow build is **retained** under `doujin/`,
-`tests/`, `pyproject.toml`, and `doujin.spec` as a fallback during the transition.
-It is **not** the active codebase — do not add features there. It opens the same
-`doujin.db`. For reference its commands are `doujin` (run), `pytest`, `ruff`, and
-`pyinstaller --clean doujin.spec`. Remove this tree once the native app is trusted.
+The original FastAPI / Jinja / Pillow build is **archived** under `legacy/` (the
+`doujin` package, its `tests/`, `pyproject.toml`, and `doujin.spec`). It is **not**
+the active codebase — do not add features there. It opens the same `doujin.db`, so
+it can run against the same library. To run it: `cd legacy`, `pip install .`, then
+`doujin`. See `legacy/README.md`.

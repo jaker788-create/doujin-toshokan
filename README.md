@@ -27,9 +27,10 @@ wails build        # produce build\bin\doujin.exe
 
 ## Legacy Python build
 
-The original Python/FastAPI implementation still lives in this repo under `doujin/` and reads the same library and database. To run it instead:
+The original Python/FastAPI implementation is archived under `legacy/` and reads the same library and database. To run it instead:
 
 ```powershell
+cd legacy
 python -m venv .venv
 .venv\Scripts\Activate.ps1     # macOS/Linux: source .venv/bin/activate
 pip install .
