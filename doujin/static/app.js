@@ -27,17 +27,21 @@ function toast(msg, kind = "ok") {
 
 // ───── Library grid ───────────────────────────────────────────────
 const grid = document.getElementById("grid");
-const q = document.getElementById("q");
 const sentinel = document.getElementById("scroll-sentinel");
 
 function card(m) {
   const cover = m.cover_rel_path
     ? `<img loading="lazy" src="/thumb?path=${encodeURIComponent(m.folder_path + "/" + m.cover_rel_path)}&w=240" alt="">`
     : `<div class="nocover"></div>`;
-  return `<a class="card" href="/manga/${m.id}">
-    <div class="card-cover">${cover}</div>
-    <div class="meta"><span class="t">${esc(m.title)}</span><span class="a">${esc(m.author)}</span></div>
-  </a>`;
+  // Mirror the server template: cover+title are one link to the title page, the
+  // author is a sibling link that filters by that author (nested <a> is invalid).
+  return `<div class="card">
+    <a class="card-main" href="/manga/${m.id}">
+      <div class="card-cover">${cover}</div>
+      <div class="meta"><span class="t">${esc(m.title)}</span></div>
+    </a>
+    <a class="a author-link" href="/?author=${m.author_id}">${esc(m.author)}</a>
+  </div>`;
 }
 
 function removeSkeletons() {
@@ -54,15 +58,26 @@ if (grid) {
   };
   state.done = state.offset < state.pageSize;
 
+  // Single source of truth for the active filter set, seeded from the server
+  // render (the grid's data-* attributes). The builder chips, the /api/search
+  // params, and the URL all derive from here. Reading it — instead of the old
+  // scattered #q + grid.dataset reads — is what lets a title term, an author,
+  // and tags all apply together (the previous reset() blanked them on every
+  // keystroke).
+  const filter = {
+    titleText: grid.dataset.q || "",
+    authorId: grid.dataset.author || "",
+    authorName: grid.dataset.authorName || "",
+    tags: grid.dataset.tags ? grid.dataset.tags.split(",").filter(Boolean) : [],
+    sort: grid.dataset.sort || "title",
+  };
+
   function currentParams() {
     const p = new URLSearchParams();
-    const sort = document.querySelector("[name=sort]")?.value || grid.dataset.sort || "title";
-    const query = (q && q.value) ? q.value : (grid.dataset.q || "");
-    if (query) p.set("q", query);
-    p.set("sort", sort);
-    if (grid.dataset.author) p.set("author", grid.dataset.author);
-    (grid.dataset.tags ? grid.dataset.tags.split(",") : [])
-      .filter(Boolean).forEach((t) => p.append("tag", t));
+    if (filter.titleText) p.set("q", filter.titleText);
+    p.set("sort", filter.sort);
+    if (filter.authorId) p.set("author", filter.authorId);
+    filter.tags.filter(Boolean).forEach((t) => p.append("tag", t));
     return p;
   }
 
@@ -111,9 +126,6 @@ if (grid) {
   }
 
   function reset() {
-    grid.dataset.q = "";
-    grid.dataset.author = "";
-    grid.dataset.tags = "";
     state.offset = 0;
     state.done = false;
     state.errored = false;
@@ -121,14 +133,203 @@ if (grid) {
     loadMore();
   }
 
-  let timer;
-  if (q) {
-    q.addEventListener("input", () => {
-      clearTimeout(timer);
-      timer = setTimeout(reset, 200);
-    });
+  // ───── Filter builder ─────────────────────────────────────────────
+  // Pick a type (title/author/tag), type a value (authors & tags autocomplete
+  // from the DB), Add → chip. Chips STAGE in `filter` without reloading; the
+  // grid only refreshes when you press Search (or change Sort).
+  const builder = document.querySelector(".builder");
+  const typeSel = builder?.querySelector(".builder-type");
+  const valueInput = builder?.querySelector(".builder-value");
+  const addBtn = builder?.querySelector(".builder-add");
+  const runBtn = builder?.querySelector(".builder-run");
+  const builderSort = builder?.querySelector(".builder-sort");
+  const chipsTray = builder?.querySelector(".builder-chips");
+  let authorByName = {}; // name -> id, from the latest author suggestions
+  let lastAuthorName = "";
+
+  function chipHtml(kind, label, value) {
+    const v = value === undefined ? "" : ` data-value="${esc(value)}"`;
+    return (
+      `<span class="chip" data-kind="${esc(kind)}"${v}>${esc(label)}` +
+      `<a href="#" class="chip-x" aria-label="Remove filter">×</a></span>`
+    );
   }
-  document.querySelector("[name=sort]")?.addEventListener("change", reset);
+
+  function renderChips() {
+    if (!chipsTray) return;
+    const out = [];
+    if (filter.titleText) out.push(chipHtml("title", "title: " + filter.titleText));
+    if (filter.authorId) {
+      out.push(chipHtml("author", "author: " + (filter.authorName || filter.authorId)));
+    }
+    filter.tags.forEach((t) => out.push(chipHtml("tag", "#" + t, t)));
+    chipsTray.innerHTML = out.join("");
+  }
+
+  chipsTray?.addEventListener("click", (e) => {
+    const x = e.target.closest(".chip-x");
+    if (!x) return;
+    e.preventDefault();
+    const ch = x.closest(".chip");
+    if (ch.dataset.kind === "title") filter.titleText = "";
+    else if (ch.dataset.kind === "author") {
+      filter.authorId = "";
+      filter.authorName = "";
+    } else if (ch.dataset.kind === "tag") {
+      filter.tags = filter.tags.filter((t) => t !== ch.dataset.value);
+    }
+    renderChips();
+  });
+
+  // Suggestions: one shared <datalist> whose options swap with the chosen type.
+  let suggestTimer;
+  function ensureDatalist() {
+    let dl = valueInput.list;
+    if (!dl) {
+      dl = document.createElement("datalist");
+      dl.id = "builder-suggest";
+      valueInput.setAttribute("list", dl.id);
+      valueInput.after(dl);
+    }
+    return dl;
+  }
+
+  async function fetchSuggestions(type, token) {
+    if (!token) return;
+    const dl = ensureDatalist();
+    try {
+      if (type === "author") {
+        const res = await fetch(`/api/authors/suggest?q=${encodeURIComponent(token)}`);
+        const data = await res.json();
+        authorByName = {};
+        data.forEach((a) => {
+          authorByName[a.name] = a.id;
+        });
+        dl.innerHTML = data.map((a) => `<option value="${esc(a.name)}">`).join("");
+      } else if (type === "tag") {
+        const res = await fetch(`/api/tags/suggest?q=${encodeURIComponent(token)}`);
+        const data = await res.json();
+        dl.innerHTML = data.map((n) => `<option value="${esc(n)}">`).join("");
+      }
+    } catch (_e) {
+      /* suggestions are best-effort */
+    }
+  }
+
+  valueInput?.addEventListener("input", () => {
+    if (valueInput.list) valueInput.list.innerHTML = "";
+    if (typeSel.value === "title") return; // free text, no suggestions
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(() => fetchSuggestions(typeSel.value, valueInput.value.trim()), 150);
+  });
+
+  typeSel?.addEventListener("change", () => {
+    if (valueInput.list) valueInput.list.innerHTML = "";
+    valueInput.placeholder =
+      typeSel.value === "title"
+        ? "Title text…"
+        : typeSel.value === "author"
+          ? "Author name…"
+          : "Tag…";
+    valueInput.focus();
+  });
+
+  async function resolveAuthorId(name) {
+    if (authorByName[name] != null) {
+      lastAuthorName = name;
+      return authorByName[name];
+    }
+    try {
+      const res = await fetch(`/api/authors/suggest?q=${encodeURIComponent(name)}`);
+      const data = await res.json();
+      const hit =
+        data.find((a) => a.name.toLowerCase() === name.toLowerCase()) ||
+        (data.length === 1 ? data[0] : null);
+      if (hit) {
+        lastAuthorName = hit.name;
+        return hit.id;
+      }
+    } catch (_e) {
+      /* fall through to "no match" */
+    }
+    return null;
+  }
+
+  async function addCurrent() {
+    const type = typeSel.value;
+    const raw = valueInput.value.trim();
+    if (!raw) return;
+    if (type === "title") {
+      filter.titleText = raw; // single free-text term (replace)
+    } else if (type === "tag") {
+      const t = raw.toLowerCase(); // mirror the server's normalize_tag
+      if (!filter.tags.includes(t)) filter.tags.push(t);
+    } else if (type === "author") {
+      // Only commit a real author id — never send a bogus author= param.
+      const id = await resolveAuthorId(raw);
+      if (!id) {
+        toast("No author matches “" + raw + "”", "err");
+        return;
+      }
+      filter.authorId = String(id);
+      filter.authorName = lastAuthorName || raw;
+    }
+    valueInput.value = "";
+    if (valueInput.list) valueInput.list.innerHTML = "";
+    renderChips();
+  }
+
+  addBtn?.addEventListener("click", addCurrent);
+  valueInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addCurrent();
+    }
+  });
+
+  async function commit() {
+    // Fold in a typed-but-not-Added value so Search "just works".
+    if (valueInput && valueInput.value.trim()) await addCurrent();
+    syncUrl();
+    reset();
+  }
+  runBtn?.addEventListener("click", commit);
+  builderSort?.addEventListener("change", () => {
+    filter.sort = builderSort.value;
+    commit();
+  });
+
+  // ───── URL sync ───────────────────────────────────────────────────
+  // Search/Sort push the filter set into the address bar so reload & bookmark
+  // re-render server-side; Back/Forward re-hydrate `filter` from the URL.
+  function syncUrl() {
+    const qs = currentParams().toString();
+    history.pushState({}, "", qs ? "/?" + qs : "/");
+  }
+  function hydrateFromUrl() {
+    const sp = new URLSearchParams(location.search);
+    filter.titleText = sp.get("q") || "";
+    const a = sp.get("author") || "";
+    if (a !== filter.authorId) filter.authorName = ""; // name unknown until re-resolved
+    filter.authorId = a;
+    filter.tags = sp.getAll("tag").filter(Boolean);
+    filter.sort = sp.get("sort") || "title";
+    if (builderSort) builderSort.value = filter.sort;
+  }
+  window.addEventListener("popstate", () => {
+    hydrateFromUrl();
+    renderChips();
+    reset();
+  });
+
+  // Reveal the builder and let it own the chip display. Drop the server-rendered
+  // .filter-status (it's the no-JS fallback only — and note that [hidden] can't
+  // hide a display:flex element, so we remove it outright).
+  if (builder) {
+    builder.hidden = false;
+    document.querySelector(".filter-status")?.remove();
+    renderChips();
+  }
 
   if (sentinel && "IntersectionObserver" in window) {
     new IntersectionObserver((entries) => {
@@ -292,6 +493,70 @@ function openLightbox(startIdx) {
 document.querySelectorAll(".gallery img").forEach((img, i) => {
   img.addEventListener("click", () => openLightbox(i));
 });
+
+// ───── Tag editor (title page) ────────────────────────────────────
+// Toggle reveals an inline form prefilled with the current tags. Submit
+// posts over XHR and re-renders the chip row in place; the .tag-input gets
+// autocomplete for free from the generic binding above. With JS off the form
+// still posts and the 303 reloads the page showing the new tags.
+const tagsBlock = document.querySelector(".tags-block");
+if (tagsBlock) {
+  const toggle = tagsBlock.querySelector(".tag-edit-toggle");
+  const form = tagsBlock.querySelector(".tag-edit");
+  const cancel = tagsBlock.querySelector(".tag-edit-cancel");
+  const input = tagsBlock.querySelector(".tag-input");
+  const row = tagsBlock.querySelector("#tagrow");
+
+  function openEditor() {
+    form.hidden = false;
+    toggle.hidden = true;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  function closeEditor() {
+    form.hidden = true;
+    toggle.hidden = false;
+  }
+
+  // Mirror the server's normalization (ingest.normalize_tag + dedupe + sort) so
+  // the optimistic re-render matches what /manga/{id}/tags actually stored.
+  function normalizeTags(raw) {
+    const seen = [];
+    raw.split(",").map((t) => t.trim().toLowerCase()).forEach((t) => {
+      if (t && !seen.includes(t)) seen.push(t);
+    });
+    return seen.sort();
+  }
+
+  toggle?.addEventListener("click", openEditor);
+  cancel?.addEventListener("click", closeEditor);
+
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector("button[type=submit]");
+    btn?.setAttribute("disabled", "true");
+    try {
+      const fd = new FormData(form);
+      const res = await fetch(form.action, { method: "POST", body: fd, redirect: "manual" });
+      // 303 redirect = success; opaqueredirect/0 also count (manual redirect).
+      if (!(res.type === "opaqueredirect" || res.ok || res.status === 303 || res.status === 0)) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const tags = normalizeTags(input.value);
+      input.value = tags.join(", ");
+      row.innerHTML = tags
+        .map((t) => `<a href="/?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`)
+        .join("");
+      toggle.textContent = tags.length ? "Edit tags" : "+ Add tags";
+      closeEditor();
+      toast("Tags saved");
+    } catch (_e) {
+      toast("Couldn't save tags", "err");
+    } finally {
+      btn?.removeAttribute("disabled");
+    }
+  });
+}
 
 // ───── Scan / Ingest form hijack ──────────────────────────────────
 // Each ingest row submits over XHR so we can fade the row out and toast

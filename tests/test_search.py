@@ -1,11 +1,13 @@
 # tests/test_search.py
 from doujin.ingest import get_or_create_tag, ingest_manga
 from doujin.search import (
+    get_author,
     get_manga,
     get_manga_tags,
     list_authors,
     list_tags,
     search_manga,
+    suggest_authors,
     suggest_tags,
 )
 
@@ -64,6 +66,37 @@ def test_suggest_tags_prefix(conn):
     _seed(conn)
     names = [r["name"] for r in suggest_tags(conn, "sc")]
     assert names == ["scifi"]
+
+
+def test_suggest_authors_substring(conn):
+    _seed(conn)
+    # Substring (not prefix): "or" is inside "Mori" but not "Aoi".
+    rows = suggest_authors(conn, "or")
+    assert [r["name"] for r in rows] == ["Mori"]
+    assert rows[0]["id"] > 0  # the id is needed for author filtering
+    # Empty prefix returns everything, ordered by name.
+    assert [r["name"] for r in suggest_authors(conn, "")] == ["Aoi", "Mori"]
+
+
+def test_get_author(conn):
+    _seed(conn)
+    mori = conn.execute("SELECT id FROM authors WHERE name='Mori'").fetchone()["id"]
+    assert get_author(conn, mori)["name"] == "Mori"
+    assert get_author(conn, 999999) is None  # dangling id -> None, no crash
+
+
+def test_search_combines_author_query_and_tags(conn):
+    _seed(conn)
+    aoi = conn.execute("SELECT id FROM authors WHERE name='Aoi'").fetchone()["id"]
+    mori = conn.execute("SELECT id FROM authors WHERE name='Mori'").fetchone()["id"]
+    action = get_or_create_tag(conn, "action")
+    scifi = get_or_create_tag(conn, "scifi")
+    conn.commit()
+    # query + author + tags all AND together -> the one matching row.
+    rows = search_manga(conn, query="blue", author_id=aoi, tag_ids=[action, scifi])
+    assert [r["title"] for r in rows] == ["Blue Sky"]
+    # A wrong author with the same tags yields nothing (guards the AND).
+    assert search_manga(conn, author_id=mori, tag_ids=[action, scifi]) == []
 
 
 def test_get_manga_and_tags(conn):

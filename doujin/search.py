@@ -55,6 +55,17 @@ def suggest_tags(conn: sqlite3.Connection, prefix: str, limit: int = 10) -> list
     ).fetchall()
 
 
+def suggest_authors(conn: sqlite3.Connection, prefix: str, limit: int = 10) -> list[sqlite3.Row]:
+    # Substring (not prefix) match: author names are full names and the memorable
+    # token is often not the first word. The %prefix% lives in a bound parameter and
+    # is NEVER interpolated. Author names aren't normalized like tags; SQLite LIKE is
+    # already ASCII-case-insensitive.
+    return conn.execute(
+        "SELECT id, name FROM authors WHERE name LIKE ? ORDER BY name LIMIT ?",
+        (f"%{prefix}%", limit),
+    ).fetchall()
+
+
 def tag_ids_for_names(conn: sqlite3.Connection, names: list[str]) -> list[int]:
     """Resolve tag names to their ids (normalized). Unknown names are skipped."""
     ids: list[int] = []
@@ -71,6 +82,10 @@ def get_manga(conn: sqlite3.Connection, manga_id: int) -> sqlite3.Row | None:
         "JOIN authors a ON a.id = m.author_id WHERE m.id = ?",
         (manga_id,),
     ).fetchone()
+
+
+def get_author(conn: sqlite3.Connection, author_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT id, name FROM authors WHERE id = ?", (author_id,)).fetchone()
 
 
 def get_manga_tags(conn: sqlite3.Connection, manga_id: int) -> list[str]:

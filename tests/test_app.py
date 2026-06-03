@@ -120,6 +120,83 @@ def test_api_tag_suggest(client, tmp_path):
     assert "scifi" in r.json()
 
 
+def _seed_two(tmp_path):
+    """Seed Aoi/Blue Sky (scifi) + Mori/Forest (slice); return (aoi_id, mori_id)."""
+    from doujin.config import db_path
+    from doujin.db import connect
+    from doujin.ingest import ingest_manga
+
+    c = connect(db_path(tmp_path / "data"))
+    ingest_manga(
+        c,
+        title="Blue Sky",
+        author="Aoi",
+        folder_path="/p1",
+        cover_rel_path=None,
+        page_count=1,
+        tags=["scifi"],
+    )
+    ingest_manga(
+        c,
+        title="Forest",
+        author="Mori",
+        folder_path="/p2",
+        cover_rel_path=None,
+        page_count=1,
+        tags=["slice"],
+    )
+    aoi = c.execute("SELECT id FROM authors WHERE name='Aoi'").fetchone()["id"]
+    mori = c.execute("SELECT id FROM authors WHERE name='Mori'").fetchone()["id"]
+    c.close()
+    return aoi, mori
+
+
+def test_api_author_suggest(client, tmp_path):
+    _seed_two(tmp_path)
+    r = client.get("/api/authors/suggest", params={"q": "ao"})
+    assert r.status_code == 200
+    data = r.json()
+    hit = next(a for a in data if a["name"] == "Aoi")
+    assert isinstance(hit["id"], int)  # id is needed to filter by author
+
+
+def test_home_author_filter_shows_name(client, tmp_path):
+    aoi, _ = _seed_two(tmp_path)
+    r = client.get("/", params={"author": aoi})
+    assert r.status_code == 200
+    assert "Blue Sky" in r.text and "Forest" not in r.text  # only Aoi's manga
+    assert "author: Aoi" in r.text  # chip shows the resolved name, not a bare id
+
+
+def test_home_author_filter_unknown_id(client, tmp_path):
+    _seed_two(tmp_path)
+    r = client.get("/", params={"author": 999999})  # dangling id
+    assert r.status_code == 200  # no 500
+    assert "Blue Sky" not in r.text and "Forest" not in r.text  # empty grid
+
+
+def test_api_search_includes_author_id(client, tmp_path):
+    aoi, _ = _seed_two(tmp_path)
+    r = client.get("/api/search", params={"q": "blue"})
+    assert r.status_code == 200
+    item = next(m for m in r.json() if m["title"] == "Blue Sky")
+    assert item["author_id"] == aoi  # cards need this to build /?author=ID links
+
+
+def test_api_search_author_and_tag(client, tmp_path):
+    aoi, _ = _seed_two(tmp_path)
+    r = client.get("/api/search", params={"author": aoi, "tag": "scifi"})
+    assert r.status_code == 200
+    data = r.json()
+    assert [m["title"] for m in data] == ["Blue Sky"]
+
+
+def test_card_author_link_present(client, tmp_path):
+    _seed_two(tmp_path)
+    r = client.get("/")
+    assert 'href="/?author=' in r.text  # author names are clickable filters
+
+
 def test_title_gallery_lists_pages(client, library, tmp_path):
     from doujin.config import db_path
     from doujin.db import connect
@@ -146,6 +223,105 @@ def test_title_gallery_lists_pages(client, library, tmp_path):
 
 def test_title_404(client):
     assert client.get("/manga/99999").status_code == 404
+
+
+def test_title_page_has_tag_editor(client, library, tmp_path):
+    from doujin.config import db_path
+    from doujin.db import connect
+    from doujin.ingest import ingest_manga
+
+    folder = str(library / "Aoi" / "Blue Sky")
+    c = connect(db_path(tmp_path / "data"))
+    mid = ingest_manga(
+        c,
+        title="Blue Sky",
+        author="Aoi",
+        folder_path=folder,
+        cover_rel_path="1.png",
+        page_count=11,
+        tags=["scifi"],
+    )
+    c.close()
+    html = client.get(f"/manga/{mid}").text
+    assert f'action="/manga/{mid}/tags"' in html  # editor form present
+    assert 'value="scifi"' in html  # input prefilled with current tags
+
+
+def test_update_tags_adds_and_persists(client, library, tmp_path):
+    from doujin.config import db_path
+    from doujin.db import connect
+    from doujin.ingest import ingest_manga
+    from doujin.search import get_manga_tags
+
+    folder = str(library / "Aoi" / "Blue Sky")
+    c = connect(db_path(tmp_path / "data"))
+    mid = ingest_manga(
+        c,
+        title="Blue Sky",
+        author="Aoi",
+        folder_path=folder,
+        cover_rel_path="1.png",
+        page_count=11,
+        tags=[],
+    )
+    c.close()
+    r = client.post(
+        f"/manga/{mid}/tags", data={"tags": "SciFi, Action , scifi"}, follow_redirects=False
+    )
+    assert r.status_code == 303
+    c = connect(db_path(tmp_path / "data"))
+    assert get_manga_tags(c, mid) == ["action", "scifi"]  # normalized + de-duped
+    c.close()
+
+
+def test_update_tags_replaces_then_filters(client, tmp_path):
+    from doujin.config import db_path
+    from doujin.db import connect
+    from doujin.ingest import ingest_manga
+
+    c = connect(db_path(tmp_path / "data"))
+    mid = ingest_manga(
+        c,
+        title="Blue Sky",
+        author="Aoi",
+        folder_path="/p1",
+        cover_rel_path=None,
+        page_count=1,
+        tags=["old"],
+    )
+    c.close()
+    client.post(f"/manga/{mid}/tags", data={"tags": "scifi"}, follow_redirects=False)
+    # new tag now filters the library; the replaced one no longer matches
+    assert "Blue Sky" in client.get("/", params={"tag": "scifi"}).text
+    assert "Blue Sky" not in client.get("/", params={"tag": "old"}).text
+
+
+def test_update_tags_empty_clears(client, tmp_path):
+    from doujin.config import db_path
+    from doujin.db import connect
+    from doujin.ingest import ingest_manga
+    from doujin.search import get_manga_tags
+
+    c = connect(db_path(tmp_path / "data"))
+    mid = ingest_manga(
+        c,
+        title="Blue Sky",
+        author="Aoi",
+        folder_path="/p1",
+        cover_rel_path=None,
+        page_count=1,
+        tags=["one", "two"],
+    )
+    c.close()
+    r = client.post(f"/manga/{mid}/tags", data={"tags": ""}, follow_redirects=False)
+    assert r.status_code == 303
+    c = connect(db_path(tmp_path / "data"))
+    assert get_manga_tags(c, mid) == []
+    c.close()
+
+
+def test_update_tags_unknown_manga_404(client):
+    assert client.post("/manga/99999/tags", data={"tags": "x"}).status_code == 404
 
 
 def test_scan_lists_unimported(client, library):

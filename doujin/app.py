@@ -101,6 +101,11 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
                 limit=PAGE_SIZE,
                 offset=0,
             )
+        # Resolve the author's display name so the filter chip can read
+        # "author: Jane Doe" instead of a bare "author". A dangling id (no row)
+        # falls back to "" and the chip is suppressed — no crash.
+        a = search.get_author(conn, author) if author else None
+        author_name = a["name"] if a else ""
         total_count = conn.execute("SELECT COUNT(*) FROM manga").fetchone()[0]
         return templates.TemplateResponse(
             request=request,
@@ -110,6 +115,7 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
                 "q": q,
                 "sort": sort,
                 "author": author or "",
+                "author_name": author_name,
                 "tags_selected": tag,
                 "next_offset": len(rows),
                 "page_size": PAGE_SIZE,
@@ -162,6 +168,7 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
                     "id": r["id"],
                     "title": r["title"],
                     "author": r["author_name"],
+                    "author_id": r["author_id"],
                     "folder_path": r["folder_path"],
                     "cover_rel_path": r["cover_rel_path"],
                 }
@@ -172,6 +179,14 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
     @app.get("/api/tags/suggest")
     def api_tag_suggest(q: str = "", conn=Depends(get_conn)):
         return JSONResponse([r["name"] for r in search.suggest_tags(conn, q)])
+
+    @app.get("/api/authors/suggest")
+    def api_author_suggest(q: str = "", conn=Depends(get_conn)):
+        # Returns {id, name}: the builder needs the id because author filtering is
+        # by integer id (m.author_id = ?), unlike tags which filter by name.
+        return JSONResponse(
+            [{"id": r["id"], "name": r["name"]} for r in search.suggest_authors(conn, q)]
+        )
 
     @app.get("/manga/{manga_id}", response_class=HTMLResponse)
     def title_page(manga_id: int, request: Request, conn=Depends(get_conn)):
@@ -190,6 +205,20 @@ def _register_pages(app, templates, get_conn, data_dir, roots):
                 "missing": not folder.exists(),
             },
         )
+
+    @app.post("/manga/{manga_id}/tags")
+    def update_tags(manga_id: int, tags: str = Form(""), conn=Depends(get_conn)):
+        # 404 on an unknown id so a stale page can't create a tag set for a
+        # manga row that no longer exists.
+        if search.get_manga(conn, manga_id) is None:
+            raise HTTPException(status_code=404, detail="not found")
+        # Same comma-split as /ingest: trim each token, drop blanks. Normalizing
+        # and de-duping happen inside set_manga_tags.
+        tag_list = [t for t in (s.strip() for s in tags.split(",")) if t]
+        ingest.set_manga_tags(conn, manga_id, tag_list)
+        # Redirect back to the title page so the no-JS path reloads with the new
+        # tags; app.js hijacks the submit to update the chips in place instead.
+        return RedirectResponse(url=f"/manga/{manga_id}", status_code=303)
 
     @app.get("/scan", response_class=HTMLResponse)
     def scan_page(request: Request, conn=Depends(get_conn)):

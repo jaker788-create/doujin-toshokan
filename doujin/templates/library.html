@@ -7,38 +7,70 @@
   <h1 class="hero-title">{{ total_count }} <span>volume{% if total_count != 1 %}s{% endif %}</span></h1>
 </section>
 
-<form id="filters" method="get" action="/">
-  <input type="search" id="q" name="q" value="{{ q }}" placeholder="Search title or author…" autocomplete="off">
-  <select name="sort">
-    <option value="title" {% if sort=='title' %}selected{% endif %}>Title</option>
-    <option value="author" {% if sort=='author' %}selected{% endif %}>Author</option>
-    <option value="date" {% if sort=='date' %}selected{% endif %}>Newest</option>
-  </select>
-  <button type="submit">Apply</button>
-</form>
+<!-- No-JS fallback: a plain text+sort search. The builder below is JS-only. -->
+<noscript>
+  <form id="filters" method="get" action="/">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search title or author…" autocomplete="off">
+    <select name="sort">
+      <option value="title" {% if sort=='title' %}selected{% endif %}>Title</option>
+      <option value="author" {% if sort=='author' %}selected{% endif %}>Author</option>
+      <option value="date" {% if sort=='date' %}selected{% endif %}>Newest</option>
+    </select>
+    <button type="submit">Apply</button>
+  </form>
+</noscript>
+
+<!-- Filter builder (revealed by app.js). Pick a parameter type, type a value
+     (tags/authors autocomplete from the DB), Add it as a chip, then Search. -->
+<div class="builder" hidden>
+  <div class="builder-row">
+    <select class="builder-type" aria-label="Filter type">
+      <option value="title">Title</option>
+      <option value="author">Author</option>
+      <option value="tag">Tag</option>
+    </select>
+    <input class="builder-value" type="text" autocomplete="off" placeholder="Add a filter…" aria-label="Filter value">
+    <button type="button" class="btn builder-add">Add</button>
+    <button type="button" class="btn btn-primary builder-run">Search</button>
+  </div>
+  <div class="builder-foot">
+    <div class="builder-chips" aria-live="polite"></div>
+    <label class="builder-sortwrap">Sort by
+      <select class="builder-sort" aria-label="Sort by">
+        <option value="title" {% if sort=='title' %}selected{% endif %}>Title</option>
+        <option value="author" {% if sort=='author' %}selected{% endif %}>Author</option>
+        <option value="date" {% if sort=='date' %}selected{% endif %}>Newest</option>
+      </select>
+    </label>
+  </div>
+</div>
 
 {% if tags_selected or author %}
 <div class="filter-status">
   <span class="label">Filtered by</span>
   {% for t in tags_selected %}<span class="chip">#{{ t }}</span>{% endfor %}
-  {% if author %}<span class="chip">author</span>{% endif %}
+  {% if author %}<span class="chip">author: {{ author_name or author }}</span>{% endif %}
   <a class="chip-clear" href="/">clear all</a>
 </div>
 {% endif %}
 
 <div class="grid" id="grid"
      data-q="{{ q }}" data-sort="{{ sort }}" data-author="{{ author }}"
+     data-author-name="{{ author_name }}"
      data-tags="{{ tags_selected | join(',') }}"
      data-next-offset="{{ next_offset }}" data-page-size="{{ page_size }}">
   {% for m in manga %}
-  <a class="card{% if m['missing'] %} missing{% endif %}" href="/manga/{{ m['id'] }}">
-    <div class="card-cover">
-      {% if m['cover_rel_path'] %}
-      <img loading="lazy" src="/thumb?path={{ (m['folder_path'] ~ '/' ~ m['cover_rel_path']) | urlencode }}&w=240" alt="">
-      {% else %}<div class="nocover"></div>{% endif %}
-    </div>
-    <div class="meta"><span class="t">{{ m['title'] }}</span><span class="a">{{ m['author_name'] }}</span></div>
-  </a>
+  <div class="card{% if m['missing'] %} missing{% endif %}">
+    <a class="card-main" href="/manga/{{ m['id'] }}">
+      <div class="card-cover">
+        {% if m['cover_rel_path'] %}
+        <img loading="lazy" src="/thumb?path={{ (m['folder_path'] ~ '/' ~ m['cover_rel_path']) | urlencode }}&w=240" alt="">
+        {% else %}<div class="nocover"></div>{% endif %}
+      </div>
+      <div class="meta"><span class="t">{{ m['title'] }}</span></div>
+    </a>
+    <a class="a author-link" href="/?author={{ m['author_id'] }}">{{ m['author_name'] }}</a>
+  </div>
   {% else %}
   <p class="empty">No manga yet. <a href="/scan">Scan your library</a> to get started.</p>
   {% endfor %}
