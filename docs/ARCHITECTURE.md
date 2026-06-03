@@ -13,9 +13,6 @@ reader. It never moves, renames, or deletes your files.
 WebView2 window), SQLite via `modernc.org/sqlite` (pure Go, no cgo),
 `disintegration/imaging` for thumbnails, TypeScript + Vite frontend (no framework).
 
-> The original Python/FastAPI build is archived under `legacy/` and reads the same
-> database; it is not the active codebase. See CLAUDE.md.
-
 ---
 
 ## How the pieces fit
@@ -86,8 +83,8 @@ Two details inside it matter:
 
 `/image` and `/thumb` (in `assets.go`) take an OS filesystem path as a query
 param. Both call `paths.IsWithinRoots` (`internal/paths/paths.go`), which
-canonicalizes the path (abs + clean, following symlinks when present, like
-Python's `Path.resolve()`) and confirms it lives under a configured library root
+canonicalizes the path (abs + clean, following symlinks when present) and
+confirms it lives under a configured library root
 **before any file access**. *Why:* without it, `?path=../../secrets` would serve
 arbitrary files. **Any new code that serves a file by path must call this guard
 first.** (Windows note in the source: the comparison is case-sensitive; in
@@ -197,8 +194,8 @@ startup.
    show the pattern; the latter confirms a pre-migration DB at `user_version 0`
    upgrades cleanly).
 
-The schema is byte-for-byte the Python build's, so the Go app opens an existing
-`doujin.db` with no migration needed.
+The schema is byte-for-byte compatible with any existing on-disk `doujin.db`, so
+the app opens it with no migration needed.
 
 ---
 

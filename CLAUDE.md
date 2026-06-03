@@ -30,9 +30,8 @@ frontend (no framework).
 - `build/` — Wails build config (icons, manifests, NSIS installer template).
 
 Metadata (authors, titles, tags, page counts, paths) lives in SQLite at
-`%APPDATA%/doujin/doujin.db` — **the same database the legacy Python build used**,
-opened unchanged. Thumbnails are disk-cached in `%APPDATA%/doujin/thumbs/`. No
-files in the library are ever moved or modified.
+`%APPDATA%/doujin/doujin.db`, opened in place. Thumbnails are disk-cached in
+`%APPDATA%/doujin/thumbs/`. No files in the library are ever moved or modified.
 
 **See `docs/ARCHITECTURE.md`** for the load-bearing invariants (index-in-place,
 the `search.SearchManga` read chokepoint, the path-traversal guard, the migration
@@ -65,11 +64,3 @@ fresh shell can't find them, prepend both to `PATH`.
 - Config: `%APPDATA%/doujin/config.json` — `library_roots` (list of paths), now
   editable in-app via the Scan page's folder picker. `port` is kept for
   backward-compatible config files but is unused (no HTTP server).
-
-## Legacy Python implementation
-
-The original FastAPI / Jinja / Pillow build is **archived** under `legacy/` (the
-`doujin` package, its `tests/`, `pyproject.toml`, and `doujin.spec`). It is **not**
-the active codebase — do not add features there. It opens the same `doujin.db`, so
-it can run against the same library. To run it: `cd legacy`, `pip install .`, then
-`doujin`. See `legacy/README.md`.
