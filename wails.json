@@ -9,5 +9,12 @@
   "author": {
     "name": "Jaker",
     "email": "jaker788@gmail.com"
+  },
+  "info": {
+    "companyName": "Jaker",
+    "productName": "Doujin Toshokan",
+    "productVersion": "0.3.0",
+    "copyright": "Copyright © 2026 Jaker",
+    "comments": "Local, offline, single-user manga library and reader"
   }
 }
