@@ -46,6 +46,26 @@ export function Search(arg1) {
   return window['go']['main']['App']['Search'](arg1);
 }
 
+export function StashGet(arg1) {
+  return window['go']['main']['App']['StashGet'](arg1);
+}
+
+export function StashList() {
+  return window['go']['main']['App']['StashList']();
+}
+
+export function StashRemove(arg1) {
+  return window['go']['main']['App']['StashRemove'](arg1);
+}
+
+export function StashSave(arg1) {
+  return window['go']['main']['App']['StashSave'](arg1);
+}
+
+export function StashSetPage(arg1, arg2) {
+  return window['go']['main']['App']['StashSetPage'](arg1, arg2);
+}
+
 export function SuggestAuthors(arg1) {
   return window['go']['main']['App']['SuggestAuthors'](arg1);
 }

@@ -141,6 +141,7 @@ Backend packages under `internal/`. Each has one responsibility.
 | `ingest` | Create/link author, manga row, and tags. `NormalizeTag`, dedupe, transactional. |
 | `search` | The read chokepoint: `SearchManga`, suggestions, tag/author/manga lookups, and the `Manga`/`Author`/`Tag` row types. |
 | `paths` | `IsWithinRoots` path-traversal guard. |
+| `stash` | Saved pages ("tabs"): CRUD over the `stash` table. An entry is a `hash` + `label` + `kind` (`search`\|`title`); title entries `LEFT JOIN manga`/`authors` for card display and own a `last_page` resume position (`ON DELETE CASCADE` with `manga`). Uses the `store.Querier` style. |
 
 Root `main` package: `app.go` (bound methods — the thin API layer that
 validates/clamps input and calls the packages above), `assets.go` (binary file

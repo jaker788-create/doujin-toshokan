@@ -77,6 +77,26 @@ export namespace main {
 	        this.offset = source["offset"];
 	    }
 	}
+	export class StashInput {
+	    kind: string;
+	    hash: string;
+	    label: string;
+	    manga_id: number;
+	    page: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new StashInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.hash = source["hash"];
+	        this.label = source["label"];
+	        this.manga_id = source["manga_id"];
+	        this.page = source["page"];
+	    }
+	}
 
 }
 
@@ -149,6 +169,43 @@ export namespace search {
 	        this.date_modified = source["date_modified"];
 	        this.missing = source["missing"];
 	        this.author_name = source["author_name"];
+	    }
+	}
+
+}
+
+export namespace stash {
+	
+	export class Entry {
+	    id: number;
+	    kind: string;
+	    hash: string;
+	    label: string;
+	    last_page: number;
+	    date_added: string;
+	    manga_id?: number;
+	    title: string;
+	    author_name: string;
+	    folder_path: string;
+	    cover_rel_path?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Entry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.hash = source["hash"];
+	        this.label = source["label"];
+	        this.last_page = source["last_page"];
+	        this.date_added = source["date_added"];
+	        this.manga_id = source["manga_id"];
+	        this.title = source["title"];
+	        this.author_name = source["author_name"];
+	        this.folder_path = source["folder_path"];
+	        this.cover_rel_path = source["cover_rel_path"];
 	    }
 	}
 

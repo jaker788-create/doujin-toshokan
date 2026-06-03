@@ -49,10 +49,16 @@ func TestInitCreatesTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := tableNames(t, db)
-	for _, want := range []string{"authors", "manga", "tags", "manga_tags"} {
+	for _, want := range []string{"authors", "manga", "tags", "manga_tags", "stash"} {
 		if !names[want] {
 			t.Errorf("missing table %q", want)
 		}
+	}
+}
+
+func TestMigrationLadderLength(t *testing.T) {
+	if MigrationCount() != 2 {
+		t.Errorf("MigrationCount() = %d, want 2", MigrationCount())
 	}
 }
 
@@ -175,8 +181,9 @@ func TestRunnerAppliesOnlyPendingMigrations(t *testing.T) {
 	if err := Init(db); err != nil {
 		t.Fatal(err)
 	}
-	if got := userVersion(t, db); got != 1 {
-		t.Fatalf("user_version = %d, want 1", got)
+	base := MigrationCount() // the baseline ladder length, before we append below
+	if got := userVersion(t, db); got != base {
+		t.Fatalf("user_version = %d, want %d", got, base)
 	}
 	_ = db.Close()
 
@@ -200,8 +207,8 @@ func TestRunnerAppliesOnlyPendingMigrations(t *testing.T) {
 	if len(applied) != 1 || applied[0] != "second" {
 		t.Errorf("applied = %v, want [second]", applied)
 	}
-	if got := userVersion(t, db2); got != 2 {
-		t.Errorf("user_version = %d, want 2", got)
+	if got := userVersion(t, db2); got != base+1 {
+		t.Errorf("user_version = %d, want %d", got, base+1)
 	}
 	if !tableNames(t, db2)["extra"] {
 		t.Error("extra table not created by pending migration")

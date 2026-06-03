@@ -3,12 +3,14 @@ import {
     Search, Count, GetManga, GetAuthor, SuggestTags, SuggestAuthors,
     UpdateTags, GetUnimported, Ingest, ImportAll, Rescan,
     GetConfig, AddLibraryRoot, RemoveLibraryRoot,
+    StashSave, StashList, StashGet, StashSetPage, StashRemove,
 } from '../wailsjs/go/main/App';
-import { main, search, scanner } from '../wailsjs/go/models';
+import { main, search, scanner, stash } from '../wailsjs/go/models';
 
 type Manga = search.Manga;
 type MangaDetail = main.MangaDetail;
 type DetectedFolder = scanner.DetectedFolder;
+type StashEntry = stash.Entry;
 
 const PAGE_SIZE = 60;
 
@@ -21,6 +23,20 @@ let viewCleanup: (() => void) | null = null;
 // Close handler for an open lightbox, so route changes can dismiss it.
 let closeLightbox: (() => void) | null = null;
 let uid = 0;
+
+// ───── stash / navigation memory ──────────────────────────────────
+// The most recent browse hash (a library or stash view). The reader's back link
+// points here so leaving a title returns to the search you came from, not "/".
+let lastBrowseHash = '#/';
+// Per-browse-hash scroll memory: where you were (scrollY) and how many cards were
+// loaded (so an infinite-scroll list can be re-filled to the same depth on return).
+const scrollMemory = new Map<string, { y: number; loaded: number }>();
+// Set true by a view that restored its own scroll, so render()'s scroll-to-top reset
+// doesn't clobber it.
+let skipScrollReset = false;
+// The currently open title, exposed so the header "save current page" button can
+// stash the reader (with its live page) from outside renderReader's scope.
+let readerState: { id: number; title: string; page: number } | null = null;
 
 // ───── helpers ────────────────────────────────────────────────────
 function esc(s: unknown): string {
@@ -62,8 +78,9 @@ interface Filter {
 
 // ───── router ─────────────────────────────────────────────────────
 type Route =
-    | { name: 'reader'; id: number }
+    | { name: 'reader'; id: number; stashId?: number }
     | { name: 'scan' }
+    | { name: 'stash' }
     | { name: 'library'; params: URLSearchParams };
 
 function parseRoute(): Route {
@@ -72,8 +89,14 @@ function parseRoute(): Route {
     const path = qi >= 0 ? raw.slice(0, qi) : raw;
     const query = qi >= 0 ? raw.slice(qi + 1) : '';
     if (path === '/scan') return { name: 'scan' };
+    if (path === '/stash') return { name: 'stash' };
     const m = path.match(/^\/manga\/(\d+)$/);
-    if (m) return { name: 'reader', id: parseInt(m[1], 10) };
+    if (m) {
+        // A title may carry ?stash=<id> when opened from a saved title tab, so the
+        // reader knows which entry to resume from and write progress back to.
+        const sid = new URLSearchParams(query).get('stash');
+        return { name: 'reader', id: parseInt(m[1], 10), stashId: sid ? parseInt(sid, 10) : undefined };
+    }
     return { name: 'library', params: new URLSearchParams(query) };
 }
 
@@ -82,14 +105,18 @@ async function render(): Promise<void> {
     if (viewCleanup) { viewCleanup(); viewCleanup = null; }
     const r = parseRoute();
     try {
-        if (r.name === 'reader') await renderReader(r.id);
+        if (r.name === 'reader') await renderReader(r.id, r.stashId);
         else if (r.name === 'scan') await renderScan();
+        else if (r.name === 'stash') await renderStash();
         else await renderLibrary(r.params);
     } catch (e) {
         console.error(e);
         viewEl().innerHTML = `<p class="empty">Something went wrong. <a href="#/">back to the archive</a></p>`;
     }
-    window.scrollTo(0, 0);
+    // Views that restore a remembered scroll position (e.g. returning from a title)
+    // opt out of the reset so we don't yank the page back to the top.
+    if (skipScrollReset) skipScrollReset = false;
+    else window.scrollTo(0, 0);
 }
 
 function navigateToFilter(f: Filter): void {
@@ -179,9 +206,11 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
     const sentinel = document.getElementById('scroll-sentinel')!;
 
     let offset = 0;
-    let loading = false;
     let done = false;
     let errored = false;
+    // One page load may be in flight at a time; both the observer and the restore
+    // loop share the same promise so they never double-fetch the same offset.
+    let inflight: Promise<void> | null = null;
 
     function showRetry(): void {
         if (grid.querySelector('.error-pill')) return;
@@ -191,14 +220,12 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
         pill.querySelector('button')!.addEventListener('click', () => {
             pill.remove();
             errored = false;
-            loadMore();
+            pump();
         });
         grid.appendChild(pill);
     }
 
-    async function loadMore(): Promise<void> {
-        if (loading || done || errored) return;
-        loading = true;
+    async function fetchPage(): Promise<void> {
         try {
             const data = await Search({
                 q: filter.titleText,
@@ -212,7 +239,7 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
             if (offset === 0 && data.length === 0) {
                 grid.innerHTML = `<p class="empty">No matches. <a href="#/">clear filters</a></p>`;
             } else {
-                grid.insertAdjacentHTML('beforeend', data.map(cardHtml).join(''));
+                grid.insertAdjacentHTML('beforeend', data.map((m) => cardHtml(m)).join(''));
             }
             offset += data.length;
             if (data.length < PAGE_SIZE) done = true;
@@ -220,19 +247,52 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
             console.error(e);
             errored = true;
             showRetry();
-        } finally {
-            loading = false;
         }
-        if (!done && !errored && sentinel.getBoundingClientRect().top < window.innerHeight) loadMore();
     }
 
-    loadMore();
+    function loadMore(): Promise<void> {
+        if (inflight) return inflight;
+        if (done || errored) return Promise.resolve();
+        inflight = fetchPage().finally(() => { inflight = null; });
+        return inflight;
+    }
+
+    // Load until the sentinel is pushed below the fold (or the list is exhausted).
+    async function fillViewport(): Promise<void> {
+        while (!done && !errored && sentinel.getBoundingClientRect().top < window.innerHeight) {
+            await loadMore();
+        }
+    }
+    const pump = () => { loadMore().then(fillViewport); };
+
+    const saved = scrollMemory.get(location.hash);
+    if (saved) {
+        scrollMemory.delete(location.hash);
+        skipScrollReset = true; // we'll restore the scroll ourselves once re-filled
+        void (async () => {
+            await loadMore();
+            while (offset < saved.loaded && !done && !errored) await loadMore();
+            window.scrollTo(0, saved.y);
+        })();
+    } else {
+        pump();
+    }
+
     const io = new IntersectionObserver((entries) => {
-        if (entries.some((e) => e.isIntersecting)) loadMore();
+        if (entries.some((e) => e.isIntersecting)) pump();
     });
     io.observe(sentinel);
 
+    // Remember where we are the moment a title card is opened, so the reader's back
+    // link can drop us right back here (filters + scroll depth).
+    grid.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement).closest('.card-main')) {
+            scrollMemory.set(location.hash, { y: window.scrollY, loaded: offset });
+        }
+    }, { capture: true });
+
     wireBuilder(filter);
+    lastBrowseHash = location.hash;
     viewCleanup = () => io.disconnect();
 }
 
@@ -347,7 +407,7 @@ function wireBuilder(filter: Filter): void {
 }
 
 // ───── reader view ────────────────────────────────────────────────
-function readerMarkup(d: MangaDetail): string {
+function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): string {
     const m = d.manga;
     const tagrow = d.tags.map((t) => `<a href="#/?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`).join('');
     const gallery = d.pages.map((p, i) =>
@@ -358,7 +418,7 @@ function readerMarkup(d: MangaDetail): string {
         : '';
     const notice = d.missing ? `<p class="notice">Folder is missing on disk: ${esc(m.folder_path)}</p>` : '';
     return `
-    <a class="back-link" href="#/">← The Archive</a>
+    <a class="back-link" href="${esc(backHref)}">${esc(backLabel)}</a>
     <header class="title-header">
         <h1>${esc(m.title)}</h1>
         <p class="byline">by <a class="author author-link" href="#/?author=${m.author_id}" data-author-name="${esc(m.author_name)}">${esc(m.author_name)}</a><span class="sep">·</span>${m.page_count} pages</p>
@@ -380,14 +440,23 @@ function readerMarkup(d: MangaDetail): string {
     ${counter}`;
 }
 
-async function renderReader(id: number): Promise<void> {
+async function renderReader(id: number, stashId?: number): Promise<void> {
+    // If opened from a saved title tab, load its entry so we can resume at and write
+    // back the last page read.
+    const stashEntry = stashId ? await StashGet(stashId).catch(() => null) : null;
     const detail = await GetManga(id);
     if (!detail) {
         viewEl().innerHTML = `<p class="empty">Not found. <a href="#/">back to the archive</a></p>`;
         return;
     }
     authorNames[String(detail.manga.author_id)] = detail.manga.author_name;
-    viewEl().innerHTML = readerMarkup(detail);
+    // The back link returns to wherever we last browsed (search results or the stash),
+    // not a blanket "/". Bare-home gets the original "The Archive" wording.
+    const backHref = lastBrowseHash || '#/';
+    const backLabel = backHref === '#/' || backHref === '#'
+        ? '← The Archive'
+        : backHref.startsWith('#/stash') ? '← Back to stash' : '← Back to results';
+    viewEl().innerHTML = readerMarkup(detail, backHref, backLabel);
 
     const pageImgs = Array.from(viewEl().querySelectorAll<HTMLImageElement>('.gallery img'));
     const counterCur = viewEl().querySelector('.reader-counter .cur') as HTMLElement | null;
@@ -395,6 +464,26 @@ async function renderReader(id: number): Promise<void> {
     let currentIdx = 0;
     let helpShown = false;
     let io: IntersectionObserver | null = null;
+    let saveTimer: number | undefined;
+
+    // Track the open title so the header save button can stash it with its live page.
+    readerState = { id, title: detail.manga.title, page: 0 };
+
+    // Resume affordance for a saved title tab: a dismissable pill that jumps to the
+    // page you left off on.
+    if (stashEntry && stashEntry.last_page > 0 && pageImgs.length > 0) {
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'resume-pill';
+        pill.textContent = `↩ Resume page ${stashEntry.last_page + 1}`;
+        pill.addEventListener('click', () => {
+            scrollToPage(stashEntry.last_page);
+            pill.remove();
+        });
+        viewEl().appendChild(pill);
+        setTimeout(() => pill.classList.add('visible'), 50);
+        setTimeout(() => pill.remove(), 8000);
+    }
 
     const scrollToPage = (i: number) => {
         const target = pageImgs[Math.max(0, Math.min(pageImgs.length - 1, i))];
@@ -433,6 +522,13 @@ async function renderReader(id: number): Promise<void> {
                     currentIdx = bestIdx;
                     cur.textContent = String(bestIdx + 1);
                     preloadNeighbors(bestIdx);
+                    if (readerState) readerState.page = bestIdx;
+                    // Persist reading progress for a saved title tab, debounced so a
+                    // fast scroll doesn't spam the backend.
+                    if (stashId) {
+                        window.clearTimeout(saveTimer);
+                        saveTimer = window.setTimeout(() => { StashSetPage(stashId, bestIdx); }, 500);
+                    }
                 }
             });
         }, { threshold: [0, 0.25, 0.5, 0.75, 1] });
@@ -466,6 +562,10 @@ async function renderReader(id: number): Promise<void> {
         document.removeEventListener('keydown', onKey);
         window.removeEventListener('scroll', onScrollOnce);
         io?.disconnect();
+        window.clearTimeout(saveTimer);
+        // Flush the final page so leaving mid-scroll doesn't lose the last move.
+        if (stashId && readerState) StashSetPage(stashId, readerState.page);
+        readerState = null;
         delete document.body.dataset.fit;
     };
 }
@@ -556,6 +656,157 @@ function openLightbox(imgs: HTMLImageElement[], startIdx: number): void {
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(box);
     closeLightbox = close;
+}
+
+// ───── stash view (saved pages / "tabs") ──────────────────────────
+// A short human label for a saved search, built from its filter params. Reused by
+// the header save button so the stash row reads like the active filter chips.
+function searchLabel(params: URLSearchParams): string {
+    const parts: string[] = [];
+    const q = params.get('q');
+    if (q) parts.push(`“${q}”`);
+    const authorId = params.get('author');
+    if (authorId) parts.push('author: ' + (authorNames[authorId] || ('#' + authorId)));
+    params.getAll('tag').filter(Boolean).forEach((t) => parts.push('#' + t));
+    if (parts.length === 0) return 'All volumes';
+    return parts.join(' · ');
+}
+
+function stashSearchCard(e: StashEntry): string {
+    const qi = e.hash.indexOf('?');
+    const params = new URLSearchParams(qi >= 0 ? e.hash.slice(qi + 1) : '');
+    const chips: string[] = [];
+    const q = params.get('q');
+    if (q) chips.push(`<span class="chip">“${esc(q)}”</span>`);
+    const authorId = params.get('author');
+    if (authorId) chips.push(`<span class="chip">author: ${esc(authorNames[authorId] || ('#' + authorId))}</span>`);
+    params.getAll('tag').filter(Boolean).forEach((t) => chips.push(`<span class="chip">#${esc(t)}</span>`));
+    const body = chips.length ? chips.join(' ') : '<span class="stash-allvol">all volumes</span>';
+    // The stored hash already lacks the leading '#'; prepend it for the link.
+    return `<div class="stash-card search" data-id="${e.id}">
+        <a class="stash-card-main" href="#${esc(e.hash)}">
+            <span class="stash-eyebrow">Search</span>
+            <span class="stash-chips">${body}</span>
+        </a>
+        <button type="button" class="stash-remove" data-id="${e.id}" aria-label="Remove from stash" title="Remove">×</button>
+    </div>`;
+}
+
+function stashTitleCard(e: StashEntry): string {
+    const cover = e.cover_rel_path
+        ? `<img loading="lazy" src="${thumbURL(e.folder_path + '/' + e.cover_rel_path)}" alt="">`
+        : `<div class="nocover"></div>`;
+    const resume = e.last_page > 0 ? `<span class="resume-hint">resume → p.${e.last_page + 1}</span>` : '';
+    return `<div class="card stash-card title" data-id="${e.id}">
+        <a class="card-main" href="#/manga/${e.manga_id}?stash=${e.id}">
+            <div class="card-cover">${cover}${resume}</div>
+            <div class="meta"><span class="t">${esc(e.title || e.label)}</span></div>
+        </a>
+        <span class="a">${esc(e.author_name)}</span>
+        <button type="button" class="stash-remove" data-id="${e.id}" aria-label="Remove from stash" title="Remove">×</button>
+    </div>`;
+}
+
+function stashEmptyHtml(): string {
+    return `<p class="empty">Nothing stashed yet. Use the <span class="inline-ico">▮</span> bookmark button to save a search or a title for later.</p>`;
+}
+
+async function renderStash(): Promise<void> {
+    let entries: StashEntry[] = [];
+    try { entries = await StashList(); } catch (e) { console.error(e); }
+    const count = entries.length;
+    const cards = entries.map((e) => (e.kind === 'title' && e.manga_id ? stashTitleCard(e) : stashSearchCard(e))).join('');
+    viewEl().innerHTML = `
+    <section class="hero">
+        <p class="eyebrow">The Stash</p>
+        <h1 class="hero-title">${count} <span>saved page${count === 1 ? '' : 's'}</span></h1>
+    </section>
+    <div class="grid" id="stash-grid">${count ? cards : stashEmptyHtml()}</div>`;
+
+    const grid = document.getElementById('stash-grid')!;
+
+    function refreshHero(): void {
+        const left = grid.querySelectorAll('[data-id]').length;
+        const h = viewEl().querySelector('.hero-title');
+        if (h) h.innerHTML = `${left} <span>saved page${left === 1 ? '' : 's'}</span>`;
+        if (left === 0) grid.innerHTML = stashEmptyHtml();
+    }
+
+    // Remember scroll before opening a card, so the reader's back link returns here.
+    grid.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement).closest('.card-main, .stash-card-main')) {
+            scrollMemory.set(location.hash, { y: window.scrollY, loaded: 0 });
+        }
+    }, { capture: true });
+
+    // Remove (×) a saved page.
+    grid.addEventListener('click', async (e) => {
+        const btn = (e.target as HTMLElement).closest('.stash-remove') as HTMLElement | null;
+        if (!btn) return;
+        e.preventDefault();
+        const id = parseInt(btn.dataset.id!, 10);
+        try {
+            await StashRemove(id);
+            const card = btn.closest('[data-id]') as HTMLElement;
+            card.style.opacity = '0';
+            setTimeout(() => { card.remove(); refreshHero(); }, 200);
+        } catch (err) { console.error(err); toast("Couldn't remove", 'err'); }
+    });
+
+    const saved = scrollMemory.get(location.hash);
+    if (saved) { scrollMemory.delete(location.hash); skipScrollReset = true; window.scrollTo(0, saved.y); }
+
+    lastBrowseHash = location.hash;
+    viewCleanup = null;
+}
+
+// Save the current page (search or title) into the stash — the "save / clone / open
+// in new tab" primitive. Reads the live reader page when a title is open.
+async function saveCurrentPage(): Promise<void> {
+    const r = parseRoute();
+    try {
+        if (r.name === 'reader' && readerState) {
+            await StashSave({
+                kind: 'title', hash: `/manga/${readerState.id}`, label: readerState.title,
+                manga_id: readerState.id, page: readerState.page,
+            });
+            toast('Title saved to stash');
+        } else if (r.name === 'library') {
+            const hash = location.hash.replace(/^#/, '') || '/';
+            await StashSave({ kind: 'search', hash, label: searchLabel(r.params), manga_id: 0, page: 0 });
+            toast('Search saved to stash');
+        } else {
+            toast('Nothing to stash on this screen', 'err');
+        }
+    } catch (e) { console.error(e); toast("Couldn't save to stash", 'err'); }
+}
+
+// ───── right-click context menu ───────────────────────────────────
+// Used for "open in new tab" on a title card and "save this page to stash" on blank
+// space. A single menu is open at a time; outside-click or Esc dismisses it.
+function onMenuKey(e: KeyboardEvent): void { if (e.key === 'Escape') closeCardMenu(); }
+function closeCardMenu(): void {
+    document.querySelector('.card-menu')?.remove();
+    document.removeEventListener('click', closeCardMenu);
+    document.removeEventListener('keydown', onMenuKey, true);
+}
+function showContextMenu(x: number, y: number, items: { label: string; run: () => void }[]): void {
+    closeCardMenu();
+    const menu = document.createElement('div');
+    menu.className = 'card-menu';
+    items.forEach((it) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = it.label;
+        b.addEventListener('click', (ev) => { ev.stopPropagation(); closeCardMenu(); it.run(); });
+        menu.appendChild(b);
+    });
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    document.body.appendChild(menu);
+    // Defer so this same right-click's trailing events don't immediately close it.
+    setTimeout(() => document.addEventListener('click', closeCardMenu), 0);
+    document.addEventListener('keydown', onMenuKey, true);
 }
 
 // ───── scan / ingest view ─────────────────────────────────────────
@@ -716,6 +967,41 @@ document.getElementById('rescan-btn')?.addEventListener('click', async () => {
         toast('Rescan failed', 'err');
     } finally {
         btn.disabled = false;
+    }
+});
+
+// Save-current-page button in the header (stash the current search or title).
+document.getElementById('stash-save-btn')?.addEventListener('click', () => { saveCurrentPage(); });
+
+// Right-click behaviour:
+//  • on a title card → "Open in new tab" (stash the title in the background so you
+//    keep your current view);
+//  • on blank space of a saveable view → "Save this page to stash" (the current
+//    search or title), mirroring the header bookmark button.
+document.addEventListener('contextmenu', (e) => {
+    const main = (e.target as HTMLElement).closest('.card-main, .stash-card-main') as HTMLAnchorElement | null;
+    const titleMatch = main && (main.getAttribute('href') || '').match(/#\/manga\/(\d+)/);
+    if (main && titleMatch) {
+        e.preventDefault();
+        const id = parseInt(titleMatch[1], 10);
+        const title = (main.querySelector('.meta .t')?.textContent || 'Title').trim();
+        showContextMenu(e.pageX, e.pageY, [{
+            label: 'Open in new tab',
+            run: async () => {
+                try {
+                    await StashSave({ kind: 'title', hash: `/manga/${id}`, label: title, manga_id: id, page: 0 });
+                    toast('Opened in new tab');
+                } catch (err) { console.error(err); toast("Couldn't stash title", 'err'); }
+            },
+        }]);
+        return;
+    }
+    // Blank space: only library/reader have a page worth saving.
+    const r = parseRoute();
+    if (r.name === 'library' || r.name === 'reader') {
+        e.preventDefault();
+        const label = r.name === 'reader' ? 'Save this title to stash' : 'Save this search to stash';
+        showContextMenu(e.pageX, e.pageY, [{ label, run: () => { saveCurrentPage(); } }]);
     }
 });
 

@@ -4,6 +4,7 @@ import {search} from '../models';
 import {config} from '../models';
 import {main} from '../models';
 import {scanner} from '../models';
+import {stash} from '../models';
 
 export function AddLibraryRoot():Promise<string>;
 
@@ -26,6 +27,16 @@ export function RemoveLibraryRoot(arg1:string):Promise<void>;
 export function Rescan():Promise<void>;
 
 export function Search(arg1:main.SearchArgs):Promise<Array<search.Manga>>;
+
+export function StashGet(arg1:number):Promise<stash.Entry>;
+
+export function StashList():Promise<Array<stash.Entry>>;
+
+export function StashRemove(arg1:number):Promise<void>;
+
+export function StashSave(arg1:main.StashInput):Promise<number>;
+
+export function StashSetPage(arg1:number,arg2:number):Promise<void>;
 
 export function SuggestAuthors(arg1:string):Promise<Array<search.Author>>;
 
