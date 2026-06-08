@@ -106,7 +106,7 @@ type Client struct {
 
 // NewClient returns a client authenticating as apiKey with the given User-Agent.
 // nhentai requires a descriptive User-Agent (e.g.
-// "DoujinToshokan/0.3.1 (contact)"). An empty apiKey makes every request fail
+// "DoujinToshokan/0.4.0 (contact)"). An empty apiKey makes every request fail
 // with ErrNoKey.
 func NewClient(apiKey, userAgent string) *Client {
 	return &Client{

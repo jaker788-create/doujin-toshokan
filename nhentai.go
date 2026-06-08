@@ -26,7 +26,7 @@ import (
 
 // defaultUserAgent is sent when the user hasn't configured one. nhentai asks for a
 // descriptive User-Agent identifying the app.
-const defaultUserAgent = "DoujinToshokan/0.3.1 (personal manga library; auto-tagger)"
+const defaultUserAgent = "DoujinToshokan/0.4.0 (personal manga library; auto-tagger)"
 
 // previewCount is how many top candidates MatchNhentai detail-fetches for tag
 // previews. Each fetch costs one rate-limited request, so this is kept small.
