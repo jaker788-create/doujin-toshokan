@@ -361,6 +361,10 @@ header .nav-spacer { margin-left: auto; }
 .tagrow a:hover { color: var(--vermilion); border-color: var(--vermilion); }
 .tags-block { margin-top: var(--s-3); }
 .tags-block .tagrow:empty { display: none; }
+/* Subject-grouped tags: a small uppercase label followed by that subject's tags. */
+.tag-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.tag-subject { font-family: var(--font-mono); font-size: var(--step--2); letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--paper-mute); }
+.chip { font-family: var(--font-mono); font-size: var(--step--1); padding: 2px var(--s-2); border: 1px solid var(--rule); border-radius: 999px; color: var(--paper-mute); white-space: nowrap; }
 .tag-edit-toggle { margin-top: var(--s-3); }
 .tag-edit[hidden] { display: none; }
 .tag-edit { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; margin-top: var(--s-3); }
@@ -380,7 +384,14 @@ header .nav-spacer { margin-left: auto; }
   background: rgba(185, 74, 46, .08);
   border-radius: 0 var(--r-2) var(--r-2) 0;
   margin: var(--s-4) 0;
+  display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;
 }
+
+/* Destructive action button + the Scan-page "remove missing" maintenance row */
+.btn-danger { color: var(--danger); border-color: var(--danger); }
+.btn-danger:hover { background: var(--danger); color: var(--ink-0); }
+.btn-danger.armed { background: var(--danger); color: var(--ink-0); }
+.missing-note { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); }
 .gallery { max-width: 900px; margin: 0 auto; }
 .gallery img {
   display: block; max-width: 100%; height: auto;
@@ -552,6 +563,9 @@ body[data-fit="height"] .gallery img { max-height: 92vh; width: auto; max-width:
 .ingest-row .path { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .ingest-row .row-status { font-family: var(--font-mono); font-size: var(--step--1); }
 .ingest-row .row-status.err { color: var(--danger); }
+.ingest-row .auto-tags { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-top: calc(-1 * var(--s-2)); }
+.ingest-row .auto-tags-label { font-family: var(--font-mono); font-size: var(--step--2); letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--paper-mute); }
+.ingest-row .auto-tags .chip { font-family: var(--font-mono); font-size: var(--step--1); padding: 2px var(--s-2); border: 1px solid var(--rule); border-radius: 999px; color: var(--paper-mute); }
 
 /* Settings (native folder picker for library roots) */
 .settings { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-5); font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); letter-spacing: var(--tracking-wide); }
@@ -608,3 +622,101 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
   .card:hover .card-cover { transform: none; }
   .toast { transform: translateX(0); opacity: 1; }
 }
+
+/* ── nhentai auto-tagging ──────────────────────────────────────────── */
+/* API-key settings row on the Scan page */
+.nh-settings .nh-key-input {
+  min-width: 260px; padding: var(--s-2) var(--s-3);
+  background: var(--ink-1); border: 1px solid var(--rule-strong); border-radius: var(--r-2);
+  color: var(--paper); font-family: var(--font-mono); font-size: var(--step--1);
+}
+.nh-settings .nh-key-input:focus { border-color: var(--vermilion); box-shadow: 0 0 0 3px var(--vermilion-soft); outline: none; }
+.nh-key-state { color: var(--paper-mute); }
+.nh-key-state.ok { color: var(--vermilion); }
+.nh-autotag-link { color: var(--paper-2); text-decoration: none; border-bottom: 1px solid var(--rule-strong); }
+.nh-autotag-link:hover { color: var(--vermilion); border-bottom-color: var(--vermilion); }
+
+/* Per-title fetch button + inline picker (in the reader's tags block) */
+.tag-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: var(--s-3); }
+.nh-panel[hidden] { display: none; }
+.nh-panel { margin-top: var(--s-4); }
+.nh-picker { border: 1px solid var(--rule-strong); border-radius: var(--r-2); background: var(--ink-1); padding: var(--s-4); }
+.nh-picker-head { margin: 0 0 var(--s-3); font-family: var(--font-mono); font-size: var(--step--1); letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--paper-mute); }
+.nh-empty { margin: 0; color: var(--paper-mute); font-style: italic; }
+.nh-cands { display: flex; flex-direction: column; gap: var(--s-2); }
+.nh-cand {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-4);
+  padding: var(--s-3); border: 1px solid var(--rule); border-radius: var(--r-2);
+}
+.nh-cand.top { border-color: var(--vermilion); background: var(--vermilion-soft); }
+.nh-cand-main { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; flex: 1 1 auto; }
+.nh-en { color: var(--paper); font-size: var(--step-0); }
+.nh-jp { color: var(--paper-2); font-size: var(--step--1); }
+.nh-meta { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); }
+.nh-pages.ok { color: var(--vermilion); }
+.nh-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
+.nh-tag { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-2); }
+.nh-more { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); font-style: italic; }
+.nh-cand .nh-apply { flex: 0 0 auto; align-self: center; }
+
+/* Local title card (cover + your-copy caption) above the candidates */
+.nh-local { display: flex; align-items: flex-start; gap: var(--s-3); padding-bottom: var(--s-3); margin-bottom: var(--s-3); border-bottom: 1px solid var(--rule); }
+.nh-local-cap { display: flex; flex-direction: column; gap: var(--s-1); }
+.nh-local-label { font-family: var(--font-mono); font-size: var(--step--1); letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--paper-mute); }
+.nh-local-author { font-size: var(--step-0); color: var(--paper-1); }
+.nh-chip { align-self: flex-start; font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-2); border: 1px solid var(--rule); border-radius: var(--r-1); padding: 0 var(--s-1); }
+.nh-local-tags { margin-top: var(--s-1); }
+.nh-local-notags { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); font-style: italic; }
+
+/* Auto-decision header with the one-click merge-apply */
+.nh-auto { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); margin-bottom: var(--s-3); }
+.nh-auto .nh-picker-head { margin: 0; }
+
+/* Covers: local (in the card) + remote nhentai candidate thumbnails */
+.nh-cover { width: 56px; aspect-ratio: 45 / 64; object-fit: cover; border-radius: var(--r-1); background: var(--ink-2); display: block; }
+.nh-local-cover { width: 72px; }
+.nh-cover-missing { background: var(--ink-2); }
+.nh-cover-wrap { flex: 0 0 auto; }
+
+/* Candidate title as an "open on nhentai" link button */
+.nh-link { background: none; border: 0; padding: 0; margin: 0; text-align: left; cursor: pointer; color: var(--paper); font-size: var(--step-0); font-family: inherit; }
+.nh-link:hover { color: var(--vermilion); text-decoration: underline; }
+
+/* Why-match badges */
+.nh-badges { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
+.nh-badge { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); border: 1px solid var(--rule); border-radius: var(--r-1); padding: 0 var(--s-1); }
+.nh-badge.ok { color: var(--vermilion); border-color: var(--vermilion); }
+.nh-badge.warn { color: var(--danger); border-color: var(--danger); }
+
+/* Highlights: the variants that will merge, and artist/parody corroboration */
+.nh-cand.merged { border-color: var(--vermilion); background: var(--vermilion-soft); }
+.nh-cand.artist-match, .nh-cand.parody-match { border-color: var(--rule-strong); }
+
+/* Bulk auto-tag page */
+.at-page { max-width: 860px; }
+.at-intro { color: var(--paper-2); max-width: 60ch; }
+.at-controls { display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap; margin: var(--s-5) 0; }
+.at-resync { display: flex; align-items: center; gap: var(--s-2); font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); }
+.at-progress[hidden] { display: none; }
+.at-bar { height: 6px; background: var(--ink-2); border-radius: var(--r-1); overflow: hidden; }
+.at-bar-fill { height: 100%; width: 0; background: var(--vermilion); transition: width var(--dur-2, .2s) var(--ease, ease); }
+.at-status { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); margin: var(--s-2) 0 0; }
+.at-log {
+  margin-top: var(--s-4); max-height: 220px; overflow-y: auto;
+  font-family: var(--font-mono); font-size: var(--step--1); line-height: 1.6;
+  border: 1px solid var(--rule); border-radius: var(--r-2); padding: var(--s-3);
+}
+.at-log:empty { display: none; }
+.at-line { color: var(--paper-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.at-line.at-applied { color: var(--paper-2); }
+.at-line.at-review { color: var(--paper); }
+.at-line.at-error { color: var(--danger); }
+.at-review { margin-top: var(--s-6); display: flex; flex-direction: column; gap: var(--s-4); }
+.at-review-head { font-size: var(--step-1); color: var(--paper); }
+.at-review-card { display: flex; flex-direction: column; gap: var(--s-3); }
+.at-review-card.done { opacity: .55; }
+.at-review-title { color: var(--paper); }
+.at-review-title a { color: var(--paper); text-decoration: none; border-bottom: 1px solid var(--rule-strong); }
+.at-review-title a:hover { color: var(--vermilion); }
+.at-review-pages { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); margin-left: var(--s-2); }
+.at-done { color: var(--vermilion); font-family: var(--font-mono); font-size: var(--step--1); margin-left: var(--s-2); }

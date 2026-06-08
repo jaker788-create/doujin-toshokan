@@ -7,7 +7,17 @@ import (
 
 	"doujin/internal/ingest"
 	"doujin/internal/store"
+	"doujin/internal/tag"
 )
+
+// gen wraps tag names as untyped/General typed tags for ingest in tests.
+func gen(names ...string) []tag.Typed {
+	out := make([]tag.Typed, len(names))
+	for i, n := range names {
+		out[i] = tag.Typed{Name: n}
+	}
+	return out
+}
 
 func newDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -28,14 +38,14 @@ func seed(t *testing.T, db *sql.DB) (int64, int64) {
 	t.Helper()
 	a, err := ingest.IngestManga(db, ingest.MangaInput{
 		Title: "Blue Sky", Author: "Aoi", FolderPath: "/p1", CoverRelPath: sp("1.png"),
-		PageCount: 11, Tags: []string{"action", "scifi"},
+		PageCount: 11, Tags: gen("action", "scifi"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, err := ingest.IngestManga(db, ingest.MangaInput{
 		Title: "Forest", Author: "Mori", FolderPath: "/p2", CoverRelPath: sp("1.png"),
-		PageCount: 3, Tags: []string{"slice-of-life"},
+		PageCount: 3, Tags: gen("slice-of-life"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -99,8 +109,8 @@ func TestFilterByAuthor(t *testing.T) {
 func TestFilterByTagsRequiresAll(t *testing.T) {
 	db := newDB(t)
 	seed(t, db)
-	action, _ := ingest.GetOrCreateTag(db, "action")
-	scifi, _ := ingest.GetOrCreateTag(db, "scifi")
+	action, _ := ingest.GetOrCreateTag(db, "action", tag.General)
+	scifi, _ := ingest.GetOrCreateTag(db, "scifi", tag.General)
 	ms, err := SearchManga(db, SearchParams{TagIDs: []int64{action, scifi}})
 	if err != nil {
 		t.Fatal(err)
@@ -249,8 +259,8 @@ func TestSearchCombinesAuthorQueryAndTags(t *testing.T) {
 	seed(t, db)
 	aoi := authorID(t, db, "Aoi")
 	mori := authorID(t, db, "Mori")
-	action, _ := ingest.GetOrCreateTag(db, "action")
-	scifi, _ := ingest.GetOrCreateTag(db, "scifi")
+	action, _ := ingest.GetOrCreateTag(db, "action", tag.General)
+	scifi, _ := ingest.GetOrCreateTag(db, "scifi", tag.General)
 
 	ms, err := SearchManga(db, SearchParams{Query: "blue", AuthorID: aoi, TagIDs: []int64{action, scifi}})
 	if err != nil {

@@ -7,7 +7,26 @@ import (
 	"testing"
 
 	"doujin/internal/store"
+	"doujin/internal/tag"
 )
+
+// gen wraps tag names as untyped/General typed tags (what the manual edit path sends).
+func gen(names ...string) []tag.Typed {
+	out := make([]tag.Typed, len(names))
+	for i, n := range names {
+		out[i] = tag.Typed{Name: n}
+	}
+	return out
+}
+
+// names extracts the names from typed tags, for comparison against expected slices.
+func names(ts []tag.Typed) []string {
+	out := make([]string, len(ts))
+	for i, t := range ts {
+		out[i] = t.Name
+	}
+	return out
+}
 
 func newDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -67,7 +86,7 @@ func TestIngestCreatesRowsAndTags(t *testing.T) {
 	mid, err := IngestManga(db, MangaInput{
 		Title: "Blue Sky", Author: "Aoi", FolderPath: "/lib/Aoi/Blue Sky",
 		CoverRelPath: sp("1.png"), PageCount: 11,
-		Tags: []string{"Action", "scifi", "Action"},
+		Tags: gen("Action", "scifi", "Action"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -118,11 +137,11 @@ func TestSetMangaTagsNormalizesDedupesAndSorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	saved, err := SetMangaTags(db, mid, []string{"  SciFi ", "action", "Action", "", "  "})
+	saved, err := SetMangaTags(db, mid, gen("  SciFi ", "action", "Action", "", "  "))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !eq(saved, []string{"action", "scifi"}) {
+	if !eq(names(saved), []string{"action", "scifi"}) {
 		t.Errorf("saved = %v, want [action scifi]", saved)
 	}
 	if !eq(tagsOf(t, db, mid), []string{"action", "scifi"}) {
@@ -134,12 +153,12 @@ func TestSetMangaTagsReplacesExisting(t *testing.T) {
 	db := newDB(t)
 	mid, err := IngestManga(db, MangaInput{
 		Title: "A", Author: "Aoi", FolderPath: "/p1", PageCount: 1,
-		Tags: []string{"old", "stale"},
+		Tags: gen("old", "stale"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SetMangaTags(db, mid, []string{"fresh"}); err != nil {
+	if _, err := SetMangaTags(db, mid, gen("fresh")); err != nil {
 		t.Fatal(err)
 	}
 	if !eq(tagsOf(t, db, mid), []string{"fresh"}) {
@@ -151,12 +170,12 @@ func TestSetMangaTagsEmptyClears(t *testing.T) {
 	db := newDB(t)
 	mid, err := IngestManga(db, MangaInput{
 		Title: "A", Author: "Aoi", FolderPath: "/p1", PageCount: 1,
-		Tags: []string{"one", "two"},
+		Tags: gen("one", "two"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	saved, err := SetMangaTags(db, mid, []string{})
+	saved, err := SetMangaTags(db, mid, gen())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +187,7 @@ func TestSetMangaTagsEmptyClears(t *testing.T) {
 func TestSetMangaTagsReusesExistingTagRows(t *testing.T) {
 	db := newDB(t)
 	a, err := IngestManga(db, MangaInput{
-		Title: "A", Author: "Aoi", FolderPath: "/p1", PageCount: 1, Tags: []string{"shared"},
+		Title: "A", Author: "Aoi", FolderPath: "/p1", PageCount: 1, Tags: gen("shared"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +196,7 @@ func TestSetMangaTagsReusesExistingTagRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SetMangaTags(db, b, []string{"shared"}); err != nil {
+	if _, err := SetMangaTags(db, b, gen("shared")); err != nil {
 		t.Fatal(err)
 	}
 	var c int
@@ -189,6 +208,69 @@ func TestSetMangaTagsReusesExistingTagRows(t *testing.T) {
 	}
 	if !eq(tagsOf(t, db, a), []string{"shared"}) || !eq(tagsOf(t, db, b), []string{"shared"}) {
 		t.Error("both manga should point at the same shared tag")
+	}
+}
+
+func tagType(t *testing.T, db *sql.DB, name string) string {
+	t.Helper()
+	var typ string
+	if err := db.QueryRow("SELECT type FROM tags WHERE name=?", name).Scan(&typ); err != nil {
+		t.Fatal(err)
+	}
+	return typ
+}
+
+func TestGetOrCreateTagUpgradesButNeverDowngrades(t *testing.T) {
+	db := newDB(t)
+	id1, err := GetOrCreateTag(db, "english", tag.General)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A meaningful subject upgrades the same row in place.
+	id2, err := GetOrCreateTag(db, "english", tag.Language)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Fatalf("expected the same tag row, got %d then %d", id1, id2)
+	}
+	if got := tagType(t, db, "english"); got != tag.Language {
+		t.Errorf("type = %q, want language after upgrade", got)
+	}
+	// Re-saving as General must NOT strip the subject.
+	if _, err := GetOrCreateTag(db, "english", tag.General); err != nil {
+		t.Fatal(err)
+	}
+	if got := tagType(t, db, "english"); got != tag.Language {
+		t.Errorf("type = %q, want language preserved (no downgrade)", got)
+	}
+}
+
+func TestSetMangaTagsPreservesSubjectOnFreeformEdit(t *testing.T) {
+	db := newDB(t)
+	mid, err := IngestManga(db, MangaInput{
+		Title: "A", Author: "Aoi", FolderPath: "/p1", PageCount: 1,
+		Tags: []tag.Typed{{Name: "english", Type: tag.Language}, {Name: "naruto", Type: tag.Parody}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the reader's freeform editor: every tag re-saved as a plain name, plus a
+	// new manual one. The subjects of the existing typed tags must survive.
+	saved, err := SetMangaTags(db, mid, gen("english", "naruto", "myfav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, tt := range saved {
+		got[tt.Name] = tt.Type
+	}
+	if got["english"] != tag.Language || got["naruto"] != tag.Parody || got["myfav"] != tag.General {
+		t.Errorf("subjects not preserved: %v", got)
+	}
+	// Saved order is by subject rank then name: language, parody, then general.
+	if names(saved)[0] != "english" || names(saved)[len(saved)-1] != "myfav" {
+		t.Errorf("order = %v, want language first, general last", names(saved))
 	}
 }
 

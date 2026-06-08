@@ -56,9 +56,71 @@ func TestInitCreatesTables(t *testing.T) {
 	}
 }
 
+func TestMigration003AddsNhentaiColumn(t *testing.T) {
+	db := openTest(t)
+	if err := Init(db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query("PRAGMA table_info(manga)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "nhentai_gallery_id" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Error("manga.nhentai_gallery_id column missing after Init")
+	}
+}
+
+func TestMigration004AddsTagTypeColumn(t *testing.T) {
+	db := openTest(t)
+	if err := Init(db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query("PRAGMA table_info(tags)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "type" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Error("tags.type column missing after Init")
+	}
+}
+
 func TestMigrationLadderLength(t *testing.T) {
-	if MigrationCount() != 2 {
-		t.Errorf("MigrationCount() = %d, want 2", MigrationCount())
+	if MigrationCount() != 4 {
+		t.Errorf("MigrationCount() = %d, want 4", MigrationCount())
 	}
 }
 

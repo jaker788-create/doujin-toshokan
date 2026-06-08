@@ -6,8 +6,28 @@ export function AddLibraryRoot() {
   return window['go']['main']['App']['AddLibraryRoot']();
 }
 
+export function ApplyNhentaiMerge(arg1, arg2) {
+  return window['go']['main']['App']['ApplyNhentaiMerge'](arg1, arg2);
+}
+
+export function ApplyNhentaiTags(arg1, arg2) {
+  return window['go']['main']['App']['ApplyNhentaiTags'](arg1, arg2);
+}
+
+export function CancelAutoTag() {
+  return window['go']['main']['App']['CancelAutoTag']();
+}
+
 export function Count() {
   return window['go']['main']['App']['Count']();
+}
+
+export function CountMissing() {
+  return window['go']['main']['App']['CountMissing']();
+}
+
+export function DeleteManga(arg1) {
+  return window['go']['main']['App']['DeleteManga'](arg1);
 }
 
 export function GetAuthor(arg1) {
@@ -22,6 +42,10 @@ export function GetManga(arg1) {
   return window['go']['main']['App']['GetManga'](arg1);
 }
 
+export function GetSettings() {
+  return window['go']['main']['App']['GetSettings']();
+}
+
 export function GetUnimported() {
   return window['go']['main']['App']['GetUnimported']();
 }
@@ -34,8 +58,16 @@ export function Ingest(arg1, arg2) {
   return window['go']['main']['App']['Ingest'](arg1, arg2);
 }
 
+export function MatchNhentai(arg1) {
+  return window['go']['main']['App']['MatchNhentai'](arg1);
+}
+
 export function RemoveLibraryRoot(arg1) {
   return window['go']['main']['App']['RemoveLibraryRoot'](arg1);
+}
+
+export function RemoveMissing() {
+  return window['go']['main']['App']['RemoveMissing']();
 }
 
 export function Rescan() {
@@ -44,6 +76,14 @@ export function Rescan() {
 
 export function Search(arg1) {
   return window['go']['main']['App']['Search'](arg1);
+}
+
+export function SetNhentaiKey(arg1) {
+  return window['go']['main']['App']['SetNhentaiKey'](arg1);
+}
+
+export function StartAutoTag(arg1) {
+  return window['go']['main']['App']['StartAutoTag'](arg1);
 }
 
 export function StashGet(arg1) {

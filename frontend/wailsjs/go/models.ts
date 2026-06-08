@@ -3,6 +3,8 @@ export namespace config {
 	export class Config {
 	    library_roots: string[];
 	    port: number;
+	    nhentai_api_key: string;
+	    nhentai_user_agent: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -12,6 +14,8 @@ export namespace config {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.library_roots = source["library_roots"];
 	        this.port = source["port"];
+	        this.nhentai_api_key = source["nhentai_api_key"];
+	        this.nhentai_user_agent = source["nhentai_user_agent"];
 	    }
 	}
 
@@ -19,10 +23,24 @@ export namespace config {
 
 export namespace main {
 	
+	export class AutoTagOptions {
+	    resync: boolean;
+	    language_mode: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AutoTagOptions(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.resync = source["resync"];
+	        this.language_mode = source["language_mode"];
+	    }
+	}
 	export class MangaDetail {
 	    manga: search.Manga;
 	    pages: string[];
-	    tags: string[];
+	    tags: tag.Typed[];
 	    missing: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -33,7 +51,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.manga = this.convertValues(source["manga"], search.Manga);
 	        this.pages = source["pages"];
-	        this.tags = source["tags"];
+	        this.tags = this.convertValues(source["tags"], tag.Typed);
 	        this.missing = source["missing"];
 	    }
 	
@@ -55,6 +73,121 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class NhentaiCandidate {
+	    gallery_id: number;
+	    media_id: string;
+	    thumbnail: string;
+	    gallery_url: string;
+	    english_title: string;
+	    japanese_title: string;
+	    num_pages: number;
+	    num_favorites: number;
+	    score: number;
+	    title_score: number;
+	    pages_exact: boolean;
+	    page_delta: number;
+	    language: string;
+	    lang_match: boolean;
+	    lang_mismatch: boolean;
+	    artist_match: boolean;
+	    parody_match: boolean;
+	    tags: tag.Typed[];
+	
+	    static createFrom(source: any = {}) {
+	        return new NhentaiCandidate(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.gallery_id = source["gallery_id"];
+	        this.media_id = source["media_id"];
+	        this.thumbnail = source["thumbnail"];
+	        this.gallery_url = source["gallery_url"];
+	        this.english_title = source["english_title"];
+	        this.japanese_title = source["japanese_title"];
+	        this.num_pages = source["num_pages"];
+	        this.num_favorites = source["num_favorites"];
+	        this.score = source["score"];
+	        this.title_score = source["title_score"];
+	        this.pages_exact = source["pages_exact"];
+	        this.page_delta = source["page_delta"];
+	        this.language = source["language"];
+	        this.lang_match = source["lang_match"];
+	        this.lang_mismatch = source["lang_mismatch"];
+	        this.artist_match = source["artist_match"];
+	        this.parody_match = source["parody_match"];
+	        this.tags = this.convertValues(source["tags"], tag.Typed);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class MatchResult {
+	    manga_id: number;
+	    local_title: string;
+	    local_author: string;
+	    local_pages: number;
+	    local_language: string;
+	    local_tags: tag.Typed[];
+	    folder_path: string;
+	    cover_rel_path?: string;
+	    decision: string;
+	    merge_gallery_ids: number[];
+	    candidates: NhentaiCandidate[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MatchResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.manga_id = source["manga_id"];
+	        this.local_title = source["local_title"];
+	        this.local_author = source["local_author"];
+	        this.local_pages = source["local_pages"];
+	        this.local_language = source["local_language"];
+	        this.local_tags = this.convertValues(source["local_tags"], tag.Typed);
+	        this.folder_path = source["folder_path"];
+	        this.cover_rel_path = source["cover_rel_path"];
+	        this.decision = source["decision"];
+	        this.merge_gallery_ids = source["merge_gallery_ids"];
+	        this.candidates = this.convertValues(source["candidates"], NhentaiCandidate);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class SearchArgs {
 	    q: string;
 	    author_id: number;
@@ -79,6 +212,20 @@ export namespace main {
 	        this.offset = source["offset"];
 	    }
 	}
+	export class Settings {
+	    has_nhentai_key: boolean;
+	    nhentai_user_agent: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Settings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.has_nhentai_key = source["has_nhentai_key"];
+	        this.nhentai_user_agent = source["nhentai_user_agent"];
+	    }
+	}
 	export class StashInput {
 	    kind: string;
 	    hash: string;
@@ -98,6 +245,42 @@ export namespace main {
 	        this.manga_id = source["manga_id"];
 	        this.page = source["page"];
 	    }
+	}
+	export class UnimportedPreview {
+	    folder: scanner.DetectedFolder;
+	    title: string;
+	    author: string;
+	    tags: tag.Typed[];
+	
+	    static createFrom(source: any = {}) {
+	        return new UnimportedPreview(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.folder = this.convertValues(source["folder"], scanner.DetectedFolder);
+	        this.title = source["title"];
+	        this.author = source["author"];
+	        this.tags = this.convertValues(source["tags"], tag.Typed);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -153,6 +336,7 @@ export namespace search {
 	    date_added: string;
 	    date_modified: string;
 	    missing: boolean;
+	    nhentai_gallery_id?: number;
 	    author_name: string;
 	
 	    static createFrom(source: any = {}) {
@@ -170,6 +354,7 @@ export namespace search {
 	        this.date_added = source["date_added"];
 	        this.date_modified = source["date_modified"];
 	        this.missing = source["missing"];
+	        this.nhentai_gallery_id = source["nhentai_gallery_id"];
 	        this.author_name = source["author_name"];
 	    }
 	}
@@ -208,6 +393,25 @@ export namespace stash {
 	        this.author_name = source["author_name"];
 	        this.folder_path = source["folder_path"];
 	        this.cover_rel_path = source["cover_rel_path"];
+	    }
+	}
+
+}
+
+export namespace tag {
+	
+	export class Typed {
+	    name: string;
+	    type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Typed(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.type = source["type"];
 	    }
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"doujin/internal/ingest"
 	"doujin/internal/store"
+	"doujin/internal/tag"
 )
 
 // Manga is a row of the manga table joined with its author name.
@@ -24,7 +25,10 @@ type Manga struct {
 	DateAdded    string  `json:"date_added"`
 	DateModified string  `json:"date_modified"`
 	Missing      bool    `json:"missing"`
-	AuthorName   string  `json:"author_name"`
+	// NhentaiGalleryID is the nhentai gallery a title's tags were copied from, or nil
+	// if it was never auto-tagged. Lets the UI show / re-sync the linked source.
+	NhentaiGalleryID *int64 `json:"nhentai_gallery_id"`
+	AuthorName       string `json:"author_name"`
 }
 
 // Author is an author row.
@@ -71,17 +75,23 @@ func scanMangaRows(rows *sql.Rows) ([]Manga, error) {
 		var m Manga
 		var cover sql.NullString
 		var missing int
+		var nhentaiID sql.NullInt64
 		// Column order matches `SELECT m.*, a.name AS author_name` (manga columns in
-		// table-definition order, then the appended author_name).
+		// table-definition order — nhentai_gallery_id was appended by migration 003 —
+		// then the appended author_name).
 		if err := rows.Scan(
 			&m.ID, &m.Title, &m.AuthorID, &m.FolderPath, &cover, &m.PageCount,
-			&m.DateAdded, &m.DateModified, &missing, &m.AuthorName,
+			&m.DateAdded, &m.DateModified, &missing, &nhentaiID, &m.AuthorName,
 		); err != nil {
 			return nil, err
 		}
 		if cover.Valid {
 			c := cover.String
 			m.CoverRelPath = &c
+		}
+		if nhentaiID.Valid {
+			id := nhentaiID.Int64
+			m.NhentaiGalleryID = &id
 		}
 		m.Missing = missing != 0
 		out = append(out, m)
@@ -250,6 +260,31 @@ func GetMangaTags(q store.Querier, mangaID int64) ([]string, error) {
 		names = append(names, n)
 	}
 	return names, rows.Err()
+}
+
+// GetMangaTagsTyped returns a manga's tags with their subjects, ordered by subject
+// (language, artist, group, parody, character, category, tag/general) then name — the
+// order the UI groups them in. This is the read chokepoint for the title detail view.
+func GetMangaTagsTyped(q store.Querier, mangaID int64) ([]tag.Typed, error) {
+	rows, err := q.Query(
+		"SELECT t.name, t.type FROM tags t JOIN manga_tags mt ON mt.tag_id = t.id "+
+			"WHERE mt.manga_id = ?", mangaID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []tag.Typed{}
+	for rows.Next() {
+		var tt tag.Typed
+		if err := rows.Scan(&tt.Name, &tt.Type); err != nil {
+			return nil, err
+		}
+		out = append(out, tt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tag.Sort(out), nil
 }
 
 // ListAuthors returns all authors ordered by name.

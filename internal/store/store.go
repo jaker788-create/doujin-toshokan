@@ -76,6 +76,8 @@ func Open(path string) (*sql.DB, error) {
 var migrations = []func(*sql.Tx) error{
 	migrate001Initial,
 	migrate002Stash,
+	migrate003NhentaiLink,
+	migrate004TagType,
 }
 
 func migrate001Initial(tx *sql.Tx) error {
@@ -100,6 +102,26 @@ CREATE TABLE IF NOT EXISTS stash (
     last_page  INTEGER NOT NULL DEFAULT 0,
     date_added TEXT NOT NULL
 );`)
+	return err
+}
+
+// migrate003NhentaiLink records which nhentai gallery a title's tags were copied
+// from. It lets the bulk auto-tagger skip already-linked titles (idempotent
+// re-runs) and lets the UI show / re-sync the matched source. Nullable: titles that
+// were never matched leave it NULL.
+func migrate003NhentaiLink(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE manga ADD COLUMN nhentai_gallery_id INTEGER;`)
+	return err
+}
+
+// migrate004TagType gives every tag a subject (the tags.type column): language,
+// artist, group, parody, character, category, or tag — the same vocabulary nhentai
+// uses (see internal/tag). Existing rows default to the empty General/untyped subject;
+// they are enriched in place the next time their subject is known (an nhentai apply or a
+// Rescan of a title whose folder name implies the subject). Nullable-by-default via
+// the DEFAULT so older databases upgrade without touching existing tag rows.
+func migrate004TagType(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE tags ADD COLUMN type TEXT NOT NULL DEFAULT '';`)
 	return err
 }
 

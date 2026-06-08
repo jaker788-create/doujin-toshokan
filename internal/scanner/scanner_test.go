@@ -107,6 +107,55 @@ func TestDetectFolderNoneWhenNoImages(t *testing.T) {
 	}
 }
 
+func TestScanRootDetectsBothLayouts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "lib")
+	mk := func(parts ...string) {
+		full := filepath.Join(append([]string{root}, parts...)...)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Organized author/title folder.
+	for i := 1; i <= 3; i++ {
+		mk("Aoi", "Blue Sky", fmt.Sprintf("%d.png", i))
+	}
+	// Raw title sitting directly in the root, no author folder, with images only.
+	raw := "[Eight PM] Raw Title [English]"
+	for i := 1; i <= 5; i++ {
+		mk(raw, fmt.Sprintf("%d.png", i))
+	}
+
+	byTitle := map[string]DetectedFolder{}
+	for _, d := range ScanRoot(root) {
+		byTitle[d.Title] = d
+	}
+
+	org, ok := byTitle["Blue Sky"]
+	if !ok {
+		t.Fatal("organized title 'Blue Sky' not detected")
+	}
+	if org.Author != "Aoi" {
+		t.Errorf("organized author = %q, want Aoi", org.Author)
+	}
+
+	rt, ok := byTitle[raw]
+	if !ok {
+		t.Fatalf("raw root title %q not detected", raw)
+	}
+	if rt.Author != "" {
+		t.Errorf("raw title author = %q, want empty (no author folder)", rt.Author)
+	}
+	if rt.PageCount != 5 {
+		t.Errorf("raw title page_count = %d, want 5", rt.PageCount)
+	}
+	if rt.FolderPath != filepath.Join(root, raw) {
+		t.Errorf("raw title folder_path = %q, want %q", rt.FolderPath, filepath.Join(root, raw))
+	}
+}
+
 func TestFindUnimportedExcludesKnown(t *testing.T) {
 	root := buildLibrary(t)
 	titles := func(ds []DetectedFolder) map[string]bool {

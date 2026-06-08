@@ -9,7 +9,9 @@
 ## Project
 
 Doujin Toshokan is a local, offline, single-user manga library and viewer. It
-indexes a collection of `author/title/*.images` folders on disk, lets you search
+indexes a collection of `author/title/*.images` folders on disk (or raw `title/`
+folders dropped straight in a root — a top-level folder with subfolders is an author,
+one with only images is a title; see `scanner.ScanRoot`), lets you search
 and filter by title, author, and tags, and read titles as a scrollable image
 gallery — without ever moving your files (index-in-place).
 
@@ -25,9 +27,11 @@ frontend (no framework).
 - `main.go` — Wails entry: window options, embeds `frontend/dist`, wires the bound methods + the asset handler.
 - `app.go` — the `App` struct; its **exported methods are the frontend JSON API** (Wails generates typed TS bindings under `frontend/wailsjs/`).
 - `assets.go` — the `/image` + `/thumb` HTTP handler (path-guarded) that serves library files to `<img>` tags.
-- `internal/` — backend packages: `config`, `store` (db + migrations), `scanner`, `ingest`, `search`, `thumbs`, `paths`, `stash` (saved pages — see below).
+- `internal/` — backend packages: `config`, `store` (db + migrations), `scanner`, `ingest`, `search`, `tag` (canonical tag **subjects** — language/artist/group/parody/character/category/tag — shared as a leaf package), `thumbs`, `paths`, `stash` (saved pages — see below).
 - `frontend/src/` — the TypeScript SPA (`main.ts`) + `theme.css`. It's a **hash-based router with no framework**: all view state lives in the URL hash (`#/`, `#/manga/{id}`, `#/stash`, `#/scan`), so a "page" is just a hash string. `frontend/public/` holds fonts + the noise texture; `frontend/wailsjs/` is **generated bindings — never hand-edit; `wails build`/`wails generate module` regenerate them from `app.go`'s exported methods**.
 - `build/` — Wails build config (icons, manifests, NSIS installer template).
+
+- Search the codebase with the MCP prior to using grep unless you have a known narrow target already.
 
 Metadata (authors, titles, tags, page counts, paths) lives in SQLite at
 `%APPDATA%/doujin/doujin.db`, opened in place. Thumbnails are disk-cached in

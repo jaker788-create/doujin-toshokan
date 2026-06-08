@@ -2,14 +2,67 @@ import './theme.css';
 import {
     Search, Count, GetManga, GetAuthor, SuggestTags, SuggestAuthors,
     UpdateTags, GetUnimported, Ingest, ImportAll, Rescan,
+    CountMissing, RemoveMissing, DeleteManga,
     GetConfig, AddLibraryRoot, RemoveLibraryRoot,
     StashSave, StashList, StashGet, StashSetPage, StashRemove,
+    GetSettings, SetNhentaiKey, MatchNhentai, ApplyNhentaiTags, ApplyNhentaiMerge,
+    StartAutoTag, CancelAutoTag,
 } from '../wailsjs/go/main/App';
-import { main, search, scanner, stash } from '../wailsjs/go/models';
+import { main, search, stash, tag } from '../wailsjs/go/models';
+import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
 
 type Manga = search.Manga;
 type MangaDetail = main.MangaDetail;
-type DetectedFolder = scanner.DetectedFolder;
+type UnimportedPreview = main.UnimportedPreview;
+type Typed = tag.Typed;
+
+// ───── tag subjects (grouped display) ─────────────────────────────
+// The backend returns tags already ordered by subject then name (see internal/tag).
+// These helpers group them by subject for display; General and the generic "tag"
+// subject both read "Tags".
+const TAG_SUBJECT_LABEL: Record<string, string> = {
+    language: 'Language', artist: 'Artist', group: 'Group', parody: 'Parody',
+    character: 'Character', category: 'Category', tag: 'Tags', '': 'Tags',
+};
+function subjectLabel(type: string): string {
+    return TAG_SUBJECT_LABEL[type] ?? 'Tags';
+}
+
+// groupBySubject buckets typed tags under their subject label, preserving the order
+// they arrive in (first-seen label order).
+function groupBySubject(tags: Typed[]): { label: string; tags: Typed[] }[] {
+    const order: string[] = [];
+    const byLabel = new Map<string, Typed[]>();
+    for (const t of tags) {
+        const label = subjectLabel(t.type);
+        if (!byLabel.has(label)) { byLabel.set(label, []); order.push(label); }
+        byLabel.get(label)!.push(t);
+    }
+    return order.map((label) => ({ label, tags: byLabel.get(label)! }));
+}
+
+// renderTagRow renders grouped tags as clickable filter links (#name), one labelled
+// group per subject. Used in the reader's tag row.
+function renderTagRow(tags: Typed[]): string {
+    return groupBySubject(tags).map((g) =>
+        `<span class="tag-group"><span class="tag-subject">${esc(g.label)}</span>`
+        + g.tags.map((t) => `<a href="#/?tag=${encodeURIComponent(t.name)}">#${esc(t.name)}</a>`).join('')
+        + `</span>`).join('');
+}
+
+// renderTagChips renders grouped tags as read-only chips (no links). Used in the scan
+// preview and the nhentai match preview.
+function renderTagChips(tags: Typed[]): string {
+    return groupBySubject(tags).map((g) =>
+        `<span class="tag-group"><span class="tag-subject">${esc(g.label)}</span>`
+        + g.tags.map((t) => `<span class="chip">${esc(t.name)}</span>`).join('')
+        + `</span>`).join('');
+}
+
+// tagNames extracts the plain names (for the freeform edit input).
+function tagNames(tags: Typed[]): string[] {
+    return tags.map((t) => t.name);
+}
 type StashEntry = stash.Entry;
 
 const PAGE_SIZE = 60;
@@ -28,6 +81,14 @@ let uid = 0;
 // The most recent browse hash (a library or stash view). The reader's back link
 // points here so leaving a title returns to the search you came from, not "/".
 let lastBrowseHash = '#/';
+// The most recent bulk-sweep review queue. Kept module-level so leaving a title to
+// inspect its images (the local-title link) and returning to #/autotag restores the
+// queue instead of forcing a re-run — which would re-hit the rate-limited nhentai API.
+// Items are dropped as they're tagged, so a cleared review never reappears.
+let reviewCache: { items: main.MatchResult[]; applied: number; cancelled: boolean } | null = null;
+function removeFromReviewCache(mangaId: number): void {
+    if (reviewCache) reviewCache.items = reviewCache.items.filter((r) => r.manga_id !== mangaId);
+}
 // Per-browse-hash scroll memory: where you were (scrollY) and how many cards were
 // loaded (so an infinite-scroll list can be re-filled to the same depth on return).
 const scrollMemory = new Map<string, { y: number; loaded: number }>();
@@ -49,6 +110,46 @@ function imageURL(path: string): string {
 }
 function thumbURL(path: string, w = 240): string {
     return `/thumb?path=${encodeURIComponent(path)}&w=${w}`;
+}
+
+// ───── nhentai cover (remote) ─────────────────────────────────────
+// WebView2 loads nhentai's public CDN directly, so candidate covers are plain remote
+// <img>s — no proxy. The cover's real extension isn't in the API, so wireCover walks
+// the candidates (absolute thumbnail first, then jpg/webp/png/gif from media_id) on
+// each load error and gives up to a neutral tile.
+const COVER_EXTS = ['jpg', 'webp', 'png', 'gif'];
+function coverCandidates(c: main.NhentaiCandidate): string[] {
+    const srcs: string[] = [];
+    if (c.thumbnail && /^https?:\/\//.test(c.thumbnail)) srcs.push(c.thumbnail);
+    if (c.media_id) {
+        const id = encodeURIComponent(c.media_id);
+        for (const ext of COVER_EXTS) srcs.push(`https://t.nhentai.net/galleries/${id}/thumb.${ext}`);
+    }
+    return srcs;
+}
+function wireCover(img: HTMLImageElement, c: main.NhentaiCandidate): void {
+    const srcs = coverCandidates(c);
+    let i = 0;
+    const next = () => {
+        if (i >= srcs.length) { img.classList.add('nh-cover-missing'); img.removeAttribute('src'); return; }
+        img.src = srcs[i++];
+    };
+    img.addEventListener('error', next);
+    next(); // listener attached first, so a failed first src advances correctly
+}
+
+// renderMatchBadges turns a candidate's scoring signals into compact "why-match"
+// badges: page match, title %, language match/mismatch, and artist/parody overlap.
+function renderMatchBadges(c: main.NhentaiCandidate): string {
+    const b: string[] = [];
+    if (c.pages_exact) b.push(`<span class="nh-badge ok">✓ exact pages</span>`);
+    else if (c.page_delta >= 0) b.push(`<span class="nh-badge">±${c.page_delta} pages</span>`);
+    b.push(`<span class="nh-badge${c.title_score >= 0.85 ? ' ok' : ''}">title ${Math.round(c.title_score * 100)}%</span>`);
+    if (c.lang_match) b.push(`<span class="nh-badge ok">✓ ${esc(c.language || 'language')}</span>`);
+    else if (c.lang_mismatch) b.push(`<span class="nh-badge warn">≠ ${esc(c.language || 'language')}</span>`);
+    if (c.artist_match) b.push(`<span class="nh-badge ok">✓ artist</span>`);
+    if (c.parody_match) b.push(`<span class="nh-badge ok">✓ parody</span>`);
+    return `<div class="nh-badges">${b.join('')}</div>`;
 }
 function viewEl(): HTMLElement {
     return document.getElementById('view')!;
@@ -82,6 +183,7 @@ type Route =
     | { name: 'reader'; id: number; stashId?: number }
     | { name: 'scan' }
     | { name: 'stash' }
+    | { name: 'autotag' }
     | { name: 'library'; params: URLSearchParams };
 
 function parseRoute(): Route {
@@ -91,6 +193,7 @@ function parseRoute(): Route {
     const query = qi >= 0 ? raw.slice(qi + 1) : '';
     if (path === '/scan') return { name: 'scan' };
     if (path === '/stash') return { name: 'stash' };
+    if (path === '/autotag') return { name: 'autotag' };
     const m = path.match(/^\/manga\/(\d+)$/);
     if (m) {
         // A title may carry ?stash=<id> when opened from a saved title tab, so the
@@ -109,6 +212,7 @@ async function render(): Promise<void> {
         if (r.name === 'reader') await renderReader(r.id, r.stashId);
         else if (r.name === 'scan') await renderScan();
         else if (r.name === 'stash') await renderStash();
+        else if (r.name === 'autotag') await renderAutotag();
         else await renderLibrary(r.params);
     } catch (e) {
         console.error(e);
@@ -431,14 +535,17 @@ function wireBuilder(filter: Filter): void {
 // ───── reader view ────────────────────────────────────────────────
 function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): string {
     const m = d.manga;
-    const tagrow = d.tags.map((t) => `<a href="#/?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`).join('');
+    const tagrow = renderTagRow(d.tags);
     const gallery = d.pages.map((p, i) =>
         `<img loading="lazy" src="${imageURL(p)}" alt="page ${i + 1}" data-page="${i + 1}">`).join('');
     const counter = d.pages.length
         ? `<div class="reader-counter" data-total="${d.pages.length}"><span class="cur">1</span><span class="sep">/</span><span class="tot">${d.pages.length}</span></div>
            <aside class="reader-help"><kbd>←</kbd><kbd>→</kbd> page · <kbd>F</kbd> fit · <kbd>⌫</kbd> back</aside>`
         : '';
-    const notice = d.missing ? `<p class="notice">Folder is missing on disk: ${esc(m.folder_path)}</p>` : '';
+    const notice = d.missing
+        ? `<div class="notice">Folder is missing on disk: ${esc(m.folder_path)}
+             <button type="button" class="btn btn-danger" data-remove-manga>Remove from library</button></div>`
+        : '';
     return `
     <a class="back-link" href="${esc(backHref)}">${esc(backLabel)}</a>
     <a class="reader-back" href="${esc(backHref)}" aria-label="${esc(backLabel)}" title="${esc(backLabel)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></a>
@@ -448,14 +555,18 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
         <div class="tags-block" data-manga="${m.id}">
             <p class="tagrow" id="tagrow">${tagrow}</p>
             <form class="tag-edit" hidden>
-                <input class="tag-input" name="tags" value="${esc(d.tags.join(', '))}" placeholder="comma, separated, tags" autocomplete="off" list="tag-suggest">
+                <input class="tag-input" name="tags" value="${esc(tagNames(d.tags).join(', '))}" placeholder="comma, separated, tags" autocomplete="off" list="tag-suggest">
                 <datalist id="tag-suggest"></datalist>
                 <div class="tag-edit-actions">
                     <button type="submit" class="btn btn-primary">Save tags</button>
                     <button type="button" class="btn tag-edit-cancel">Cancel</button>
                 </div>
             </form>
-            <button type="button" class="tag-edit-toggle btn">${d.tags.length ? 'Edit tags' : '+ Add tags'}</button>
+            <div class="tag-actions">
+                <button type="button" class="tag-edit-toggle btn">${d.tags.length ? 'Edit tags' : '+ Add tags'}</button>
+                <button type="button" class="nh-fetch btn">Fetch tags (nhentai)</button>
+            </div>
+            <div class="nh-panel" hidden></div>
         </div>
         ${notice}
     </header>
@@ -478,8 +589,26 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     const backHref = lastBrowseHash || '#/';
     const backLabel = backHref === '#/' || backHref === '#'
         ? '← The Archive'
-        : backHref.startsWith('#/stash') ? '← Back to stash' : '← Back to results';
+        : backHref.startsWith('#/stash') ? '← Back to stash'
+        : backHref.startsWith('#/autotag') ? '← Back to review'
+        : '← Back to results';
     viewEl().innerHTML = readerMarkup(detail, backHref, backLabel);
+
+    // A missing title can be removed from the library here (its folder is gone); files
+    // are never touched, so a present folder would just be re-offered for import.
+    const removeBtn = viewEl().querySelector('[data-remove-manga]') as HTMLButtonElement | null;
+    removeBtn?.addEventListener('click', async () => {
+        removeBtn.disabled = true;
+        try {
+            await DeleteManga(id);
+            toast('Removed from library');
+            location.hash = backHref;
+        } catch (err) {
+            console.error(err);
+            toast('Could not remove title', 'err');
+            removeBtn.disabled = false;
+        }
+    });
 
     const pageImgs = Array.from(viewEl().querySelectorAll<HTMLImageElement>('.gallery img'));
     const counterCur = viewEl().querySelector('.reader-counter .cur') as HTMLElement | null;
@@ -639,6 +768,15 @@ function wireTagEditor(id: number): void {
     const row = block.querySelector('#tagrow') as HTMLElement;
     const datalist = block.querySelector('#tag-suggest') as HTMLDataListElement;
 
+    // Render a saved (subject-ordered) tag list into the row, the edit input, and the
+    // toggle label. Shared by the manual save and the nhentai apply flows. The row
+    // shows grouped subjects; the input stays a flat, editable list of names.
+    const renderTags = (saved: Typed[]) => {
+        input.value = tagNames(saved).join(', ');
+        row.innerHTML = renderTagRow(saved);
+        toggle.textContent = saved.length ? 'Edit tags' : '+ Add tags';
+    };
+
     toggle.addEventListener('click', () => {
         form.hidden = false;
         toggle.hidden = true;
@@ -667,9 +805,7 @@ function wireTagEditor(id: number): void {
         try {
             const requested = input.value.split(',').map((t) => t.trim()).filter(Boolean);
             const saved = await UpdateTags(id, requested); // server normalizes + sorts
-            input.value = saved.join(', ');
-            row.innerHTML = saved.map((t) => `<a href="#/?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`).join('');
-            toggle.textContent = saved.length ? 'Edit tags' : '+ Add tags';
+            renderTags(saved);
             form.hidden = true;
             toggle.hidden = false;
             toast('Tags saved');
@@ -680,6 +816,157 @@ function wireTagEditor(id: number): void {
             btn.disabled = false;
         }
     });
+
+    // nhentai: fetch candidate galleries and let the user apply one's tags. The picker
+    // renders inline below the buttons; applying merges the gallery's tags with any
+    // existing ones (server-side union) and re-renders the row.
+    const nhBtn = block.querySelector('.nh-fetch') as HTMLButtonElement | null;
+    const nhPanel = block.querySelector('.nh-panel') as HTMLElement | null;
+    if (nhBtn && nhPanel) {
+        nhBtn.addEventListener('click', async () => {
+            nhBtn.disabled = true;
+            const label = nhBtn.textContent;
+            nhBtn.textContent = 'Searching nhentai…';
+            try {
+                const res = await MatchNhentai(id);
+                nhPanel.innerHTML = '';
+                nhPanel.appendChild(buildMatchPicker(id, res, (saved) => {
+                    renderTags(saved);
+                    nhPanel.hidden = true;
+                    nhPanel.innerHTML = '';
+                }));
+                nhPanel.hidden = false;
+            } catch (err) {
+                console.error(err);
+                toast(nhErr(err), 'err');
+            } finally {
+                nhBtn.disabled = false;
+                nhBtn.textContent = label;
+            }
+        });
+    }
+}
+
+// nhErr maps a backend error to a friendly message, special-casing the missing-key
+// case so the user knows where to fix it.
+function nhErr(err: unknown): string {
+    const msg = String((err as { message?: string } | undefined)?.message || err || '');
+    if (msg.toLowerCase().includes('api key')) return 'Add your nhentai API key on the Scan page first';
+    return 'nhentai request failed — try again';
+}
+
+// buildMatchPicker renders the local title's cover beside the ranked candidates for one
+// title. onApplied fires with the saved tag list after a successful apply. Used by the
+// reader and the bulk review queue alike. On an auto decision it shows a one-click
+// "Apply matched tags" that merges the whole qualifying set; each candidate can still be
+// applied on its own or opened on nhentai for a visual check.
+function buildMatchPicker(
+    mangaId: number,
+    res: main.MatchResult,
+    onApplied: (saved: Typed[]) => void,
+): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'nh-picker';
+    if (res.decision === 'none' || !res.candidates.length) {
+        wrap.innerHTML = `<p class="nh-empty">No nhentai matches found.</p>`;
+        return wrap;
+    }
+    const auto = res.decision === 'auto';
+
+    const localCover = res.cover_rel_path
+        ? `<img class="nh-cover nh-local-cover" src="${thumbURL(res.folder_path + '/' + res.cover_rel_path)}" alt="">`
+        : `<div class="nh-cover nh-cover-missing"></div>`;
+    const localLang = res.local_language ? `<span class="nh-chip">${esc(res.local_language)}</span>` : '';
+    const localAuthor = res.local_author ? `<span class="nh-local-author">${esc(res.local_author)}</span>` : '';
+    const localTags = (res.local_tags && res.local_tags.length)
+        ? `<div class="nh-tags nh-local-tags">${renderTagChips(res.local_tags.slice(0, 24))}${
+            res.local_tags.length > 24 ? `<span class="nh-more">+${res.local_tags.length - 24} more</span>` : ''}</div>`
+        : `<div class="nh-local-tags nh-local-notags">no tags yet</div>`;
+    const mergeCount = res.merge_gallery_ids?.length || 0;
+    const headHTML = auto
+        ? `<div class="nh-auto"><p class="nh-picker-head">Auto-matched — merges tags from ${mergeCount} galler${mergeCount === 1 ? 'y' : 'ies'}.</p>
+             <button type="button" class="btn btn-primary nh-merge">Apply matched tags</button></div>`
+        : `<p class="nh-picker-head">Multiple possible matches — pick the right one:</p>`;
+
+    wrap.innerHTML = `
+        <div class="nh-local">${localCover}
+            <div class="nh-local-cap"><span class="nh-local-label">Your copy</span>
+                ${localAuthor}
+                <span class="nh-meta">${res.local_pages}p</span>${localLang}
+                ${localTags}</div>
+        </div>
+        ${headHTML}
+        <div class="nh-cands"></div>`;
+    const list = wrap.querySelector('.nh-cands') as HTMLElement;
+    const disableAll = (on: boolean) =>
+        wrap.querySelectorAll('button').forEach((b) => ((b as HTMLButtonElement).disabled = on));
+
+    // One-click merge-apply for the auto case.
+    const mergeBtn = wrap.querySelector('.nh-merge') as HTMLButtonElement | null;
+    if (mergeBtn) {
+        mergeBtn.addEventListener('click', async () => {
+            disableAll(true);
+            mergeBtn.textContent = 'Applying…';
+            try {
+                const saved = await ApplyNhentaiMerge(mangaId, res.merge_gallery_ids);
+                toast('Tags applied from nhentai');
+                onApplied(saved);
+            } catch (err) {
+                console.error(err);
+                toast(nhErr(err), 'err');
+                disableAll(false);
+                mergeBtn.textContent = 'Apply matched tags';
+            }
+        });
+    }
+
+    res.candidates.forEach((c) => {
+        const merged = (res.merge_gallery_ids || []).includes(c.gallery_id);
+        const pages = c.pages_exact
+            ? `<span class="nh-pages ok">${c.num_pages}p · exact (vs ${res.local_pages}p)</span>`
+            : `<span class="nh-pages">${c.num_pages}p (you have ${res.local_pages}p)</span>`;
+        const jp = c.japanese_title ? `<span class="nh-jp">${esc(c.japanese_title)}</span>` : '';
+        const tags = (c.tags && c.tags.length)
+            ? `<div class="nh-tags">${renderTagChips(c.tags.slice(0, 24))}${
+                c.tags.length > 24 ? `<span class="nh-more">+${c.tags.length - 24} more</span>` : ''}</div>`
+            : '';
+        const row = document.createElement('div');
+        row.className = 'nh-cand'
+            + (merged ? ' merged' : '')
+            + (c.artist_match ? ' artist-match' : '')
+            + (c.parody_match ? ' parody-match' : '');
+        row.innerHTML = `
+            <div class="nh-cover-wrap"><img class="nh-cover"></div>
+            <div class="nh-cand-main">
+                <button type="button" class="nh-en nh-link" title="Open on nhentai">${esc(c.english_title || c.japanese_title || ('gallery #' + c.gallery_id))}</button>
+                ${jp}
+                <span class="nh-meta">${pages} · ♥ ${c.num_favorites} · #${c.gallery_id}</span>
+                ${renderMatchBadges(c)}
+                ${tags}
+            </div>
+            <button type="button" class="btn nh-apply">${auto ? 'Use only this' : 'Apply tags'}</button>`;
+        wireCover(row.querySelector('.nh-cover') as HTMLImageElement, c);
+        (row.querySelector('.nh-link') as HTMLButtonElement).addEventListener('click', () => {
+            if (c.gallery_url) BrowserOpenURL(c.gallery_url);
+        });
+        const applyBtn = row.querySelector('.nh-apply') as HTMLButtonElement;
+        applyBtn.addEventListener('click', async () => {
+            disableAll(true);
+            applyBtn.textContent = 'Applying…';
+            try {
+                const saved = await ApplyNhentaiTags(mangaId, c.gallery_id);
+                toast('Tags applied from nhentai');
+                onApplied(saved);
+            } catch (err) {
+                console.error(err);
+                toast(nhErr(err), 'err');
+                disableAll(false);
+                applyBtn.textContent = auto ? 'Use only this' : 'Apply tags';
+            }
+        });
+        list.appendChild(row);
+    });
+    return wrap;
 }
 
 // ───── lightbox ───────────────────────────────────────────────────
@@ -869,13 +1156,29 @@ function showContextMenu(x: number, y: number, items: { label: string; run: () =
 }
 
 // ───── scan / ingest view ─────────────────────────────────────────
-function scanMarkup(count: number, roots: string[]): string {
+function scanMarkup(count: number, roots: string[], hasKey: boolean, missing: number): string {
     const rootChips = roots.length
         ? roots.map((r) =>
             `<span class="chip">${esc(r)}<a href="#" class="chip-x" data-remove-root="${esc(r)}" aria-label="Remove folder">×</a></span>`).join(' ')
         : `<span class="roots">No library folders yet — add one to start scanning.</span>`;
-    const settings = `<div class="settings"><span class="label">Library folders</span> ${rootChips}
+    const folderSettings = `<div class="settings"><span class="label">Library folders</span> ${rootChips}
         <button type="button" class="btn" data-add-root>Add folder…</button></div>`;
+    // nhentai API key: entered here (password field), stored in config; never echoed
+    // back. When a key is set, the auto-tag sweep becomes available.
+    const keyState = hasKey
+        ? `<span class="nh-key-state ok">key configured</span> <a class="nh-autotag-link" href="#/autotag">Auto-tag library →</a>`
+        : `<span class="nh-key-state">no key set — needed for auto-tagging</span>`;
+    const keySettings = `<div class="settings nh-settings"><span class="label">nhentai API key</span>
+        <input type="password" class="nh-key-input" placeholder="${hasKey ? '•••••••• (replace)' : 'paste your personal key'}" autocomplete="off" spellcheck="false">
+        <button type="button" class="btn" data-save-key>Save key</button> ${keyState}</div>`;
+    // Maintenance: titles whose folders vanished from disk are kept (never auto-deleted),
+    // so moving/removing folders leaves "missing" rows. This is the one place to clear them.
+    const maintenance = missing > 0
+        ? `<div class="settings"><span class="label">Maintenance</span>
+            <span class="missing-note">${missing} missing title${missing === 1 ? '' : 's'} — folders gone from disk</span>
+            <button type="button" class="btn btn-danger" data-remove-missing>Remove missing</button></div>`
+        : '';
+    const settings = folderSettings + keySettings + maintenance;
     const header = `
     <header class="scan-header">
         <div>
@@ -888,20 +1191,27 @@ function scanMarkup(count: number, roots: string[]): string {
     return settings + header + empty + `<div id="scan-list"></div>`;
 }
 
-function ingestRow(d: DetectedFolder): HTMLElement {
+function ingestRow(p: UnimportedPreview): HTMLElement {
+    const d = p.folder;
     const listId = `tag-suggest-scan-${uid++}`;
     const cover = d.cover_rel_path
         ? `<img src="${thumbURL(d.folder_path + '/' + d.cover_rel_path)}" alt="">`
         : `<div class="nocover"></div>`;
+    // Tags implied by the folder name (language, parody, …) are applied automatically
+    // on import — show them as read-only chips; the input below is for extra tags.
+    const autoTags = (p.tags && p.tags.length)
+        ? `<div class="auto-tags"><span class="auto-tags-label">auto</span>${renderTagChips(p.tags)}</div>`
+        : '';
     const row = document.createElement('div');
     row.className = 'ingest-row';
     row.innerHTML = `
         <div class="cover">${cover}</div>
         <div class="fields">
-            <label>Author <input class="f-author" value="${esc(d.author)}"></label>
-            <label>Title <input class="f-title" value="${esc(d.title)}"></label>
-            <label class="full">Tags <input class="tag-input f-tags" placeholder="comma, separated, tags" autocomplete="off" list="${listId}"></label>
+            <label>Author <input class="f-author" value="${esc(p.author)}"></label>
+            <label>Title <input class="f-title" value="${esc(p.title)}"></label>
+            <label class="full">Extra tags <input class="tag-input f-tags" placeholder="comma, separated, tags" autocomplete="off" list="${listId}"></label>
             <datalist id="${listId}"></datalist>
+            ${autoTags}
             <div class="footer-row">
                 <span class="path">${d.page_count} pages · ${esc(d.folder_path)}</span>
                 <span class="row-status" role="status"></span>
@@ -933,8 +1243,10 @@ function ingestRow(d: DetectedFolder): HTMLElement {
         row.classList.add('saving');
         status.classList.remove('err');
         status.textContent = 'saving…';
-        d.author = authorInput.value.trim() || d.author;
-        d.title = titleInput.value.trim() || d.title;
+        // Apply the (possibly edited) author/title onto the folder; tags implied by the
+        // name are re-derived server-side, so the input only carries extra user tags.
+        d.author = authorInput.value.trim() || p.author;
+        d.title = titleInput.value.trim() || p.title;
         const tags = tagsInput.value.split(',').map((t) => t.trim()).filter(Boolean);
         try {
             await Ingest(d, tags);
@@ -954,8 +1266,59 @@ function ingestRow(d: DetectedFolder): HTMLElement {
 }
 
 async function renderScan(): Promise<void> {
-    const [found, cfg] = await Promise.all([GetUnimported(), GetConfig()]);
-    viewEl().innerHTML = scanMarkup(found.length, cfg.library_roots);
+    const [found, cfg, settings, missing] = await Promise.all([
+        GetUnimported(), GetConfig(), GetSettings(), CountMissing(),
+    ]);
+    viewEl().innerHTML = scanMarkup(found.length, cfg.library_roots, settings.has_nhentai_key, missing);
+
+    // Remove missing titles. Two-step: the first click arms the button (since this drops
+    // those titles' tags/nhentai links — recoverable only by re-scanning the folders).
+    const rmMissingBtn = viewEl().querySelector('[data-remove-missing]') as HTMLButtonElement | null;
+    if (rmMissingBtn) {
+        let armed = false;
+        let armTimer: number | undefined;
+        rmMissingBtn.addEventListener('click', async () => {
+            if (!armed) {
+                armed = true;
+                rmMissingBtn.classList.add('armed');
+                rmMissingBtn.textContent = `Click again to remove ${missing}`;
+                armTimer = window.setTimeout(() => {
+                    armed = false;
+                    rmMissingBtn.classList.remove('armed');
+                    rmMissingBtn.textContent = 'Remove missing';
+                }, 4000);
+                return;
+            }
+            window.clearTimeout(armTimer);
+            rmMissingBtn.disabled = true;
+            try {
+                const removed = await RemoveMissing();
+                toast(`Removed ${removed} missing title${removed === 1 ? '' : 's'}`);
+                render();
+            } catch (err) {
+                console.error(err);
+                toast('Could not remove missing titles', 'err');
+                rmMissingBtn.disabled = false;
+            }
+        });
+    }
+
+    const saveKeyBtn = viewEl().querySelector('[data-save-key]') as HTMLButtonElement | null;
+    const keyInput = viewEl().querySelector('.nh-key-input') as HTMLInputElement | null;
+    saveKeyBtn?.addEventListener('click', async () => {
+        const v = (keyInput?.value || '').trim();
+        if (!v) { toast('Enter a key first', 'err'); return; }
+        saveKeyBtn.disabled = true;
+        try {
+            await SetNhentaiKey(v);
+            toast('nhentai key saved');
+            render();
+        } catch (err) {
+            console.error(err);
+            toast('Could not save key', 'err');
+            saveKeyBtn.disabled = false;
+        }
+    });
 
     const addBtn = viewEl().querySelector('[data-add-root]') as HTMLButtonElement | null;
     addBtn?.addEventListener('click', async () => {
@@ -999,8 +1362,209 @@ async function renderScan(): Promise<void> {
         }
     });
     const list = document.getElementById('scan-list')!;
-    found.forEach((d) => list.appendChild(ingestRow(d)));
+    found.forEach((p) => list.appendChild(ingestRow(p)));
     viewCleanup = null;
+}
+
+// ───── auto-tag from nhentai (bulk sweep) ─────────────────────────
+// Event payloads are emitted via Wails runtime events (not method returns), so Wails
+// generates no model class for them — these mirror the Go structs in nhentai.go.
+interface ATProgress {
+    done: number;
+    total: number;
+    manga_id: number;
+    title: string;
+    outcome: string;
+    detail: string;
+}
+interface ATDone {
+    total: number;
+    applied: number;
+    needs_review: main.MatchResult[];
+    cancelled: boolean;
+}
+
+function autotagMarkup(hasKey: boolean): string {
+    if (!hasKey) {
+        return `<section class="at-page">
+            <a class="back-link" href="#/scan">← Scan &amp; settings</a>
+            <h1>Auto-tag from nhentai</h1>
+            <p class="empty">No nhentai API key set. Add your personal key on the
+                <a href="#/scan">Scan</a> page to enable auto-tagging.</p>
+        </section>`;
+    }
+    return `<section class="at-page">
+        <a class="back-link" href="#/scan">← Scan &amp; settings</a>
+        <h1>Auto-tag from nhentai</h1>
+        <p class="at-intro">Searches nhentai for each title, auto-applies confident
+            matches (exact page count + strong title match), and queues the rest for you
+            to confirm below. Requests are rate-limited, so a large library takes a while.</p>
+        <div class="at-controls">
+            <label class="at-resync"><input type="checkbox" data-resync> Re-tag titles already linked</label>
+            <label class="builder-sortwrap at-langmode">Language
+                <select class="builder-sort" data-langmode aria-label="Language to match">
+                    <option value="auto">Auto (follow each title)</option>
+                    <option value="english">English only</option>
+                    <option value="japanese">Japanese only</option>
+                </select>
+            </label>
+            <button type="button" class="btn btn-primary" data-start>Start auto-tagging</button>
+            <button type="button" class="btn" data-cancel hidden>Cancel</button>
+        </div>
+        <div class="at-progress" hidden>
+            <div class="at-bar"><div class="at-bar-fill"></div></div>
+            <p class="at-status" role="status"></p>
+        </div>
+        <div class="at-log" aria-live="polite"></div>
+        <div class="at-review"></div>
+    </section>`;
+}
+
+// renderReviewQueue lists the ambiguous titles from a sweep, each with its own
+// candidate picker so the user can confirm a match.
+function renderReviewQueue(
+    container: HTMLElement,
+    items: main.MatchResult[],
+    onItemDone?: (mangaId: number) => void,
+): void {
+    if (!items.length) return;
+    const head = document.createElement('h2');
+    head.className = 'at-review-head';
+    head.textContent = `Needs review (${items.length})`;
+    container.appendChild(head);
+    items.forEach((res) => {
+        const card = document.createElement('div');
+        card.className = 'at-review-card';
+        card.innerHTML = `<div class="at-review-title">
+            <a href="#/manga/${res.manga_id}">${esc(res.local_title)}</a>
+            <span class="at-review-pages">${res.local_pages}p</span></div>`;
+        card.appendChild(buildMatchPicker(res.manga_id, res, () => {
+            card.classList.add('done');
+            (card.querySelector('.at-review-title') as HTMLElement)
+                .insertAdjacentHTML('beforeend', ' <span class="at-done">✓ tagged</span>');
+            onItemDone?.(res.manga_id);
+        }));
+        container.appendChild(card);
+    });
+}
+
+async function renderAutotag(): Promise<void> {
+    const settings = await GetSettings();
+    viewEl().innerHTML = autotagMarkup(settings.has_nhentai_key);
+    // The reader's back link follows lastBrowseHash, so record this page: leaving a
+    // review title to inspect it returns here (to the restored queue), not to "/".
+    lastBrowseHash = '#/autotag';
+    if (!settings.has_nhentai_key) { viewCleanup = null; return; }
+
+    const startBtn = viewEl().querySelector('[data-start]') as HTMLButtonElement;
+    const cancelBtn = viewEl().querySelector('[data-cancel]') as HTMLButtonElement;
+    const resync = viewEl().querySelector('[data-resync]') as HTMLInputElement;
+    const langMode = viewEl().querySelector('[data-langmode]') as HTMLSelectElement;
+    const barWrap = viewEl().querySelector('.at-progress') as HTMLElement;
+    const bar = viewEl().querySelector('.at-bar-fill') as HTMLElement;
+    const statusEl = viewEl().querySelector('.at-status') as HTMLElement;
+    const logEl = viewEl().querySelector('.at-log') as HTMLElement;
+    const reviewEl = viewEl().querySelector('.at-review') as HTMLElement;
+
+    // Remember the scroll spot when opening a local title from the queue, so returning
+    // to the review page lands where we left off (same scrollMemory the library/reader
+    // views use). The listener lives on the container, so it survives re-population.
+    reviewEl.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement).closest('a[href^="#/manga/"]')) {
+            scrollMemory.set('#/autotag', { y: window.scrollY, loaded: 0 });
+        }
+    }, { capture: true });
+
+    // EventsOn returns its own unsubscribe; track them so leaving the view (or a new
+    // run) detaches the listeners cleanly.
+    let offProgress: (() => void) | null = null;
+    let offDone: (() => void) | null = null;
+    const detach = () => { offProgress?.(); offDone?.(); offProgress = offDone = null; };
+
+    const logLine = (cls: string, text: string) => {
+        const line = document.createElement('div');
+        line.className = 'at-line at-' + cls;
+        line.textContent = text;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    // Restore a prior sweep's review queue when returning to this page (e.g. after
+    // opening a local title to compare images), so a re-run — and another round of
+    // rate-limited nhentai requests — isn't needed just to see the queue again.
+    if (reviewCache && reviewCache.items.length) {
+        barWrap.hidden = false;
+        bar.style.width = '100%';
+        statusEl.textContent = `${reviewCache.cancelled ? 'Cancelled' : 'Done'} — ${reviewCache.applied} auto-applied, ${reviewCache.items.length} need review`;
+        renderReviewQueue(reviewEl, reviewCache.items, removeFromReviewCache);
+        // Covers reserve height via CSS aspect-ratio, so the queue's full height exists
+        // synchronously now — restore the scroll spot before render()'s default top-reset.
+        const savedScroll = scrollMemory.get('#/autotag');
+        if (savedScroll) {
+            scrollMemory.delete('#/autotag');
+            skipScrollReset = true;
+            window.scrollTo(0, savedScroll.y);
+        }
+    }
+
+    startBtn.addEventListener('click', async () => {
+        detach();
+        reviewCache = null; // a fresh run supersedes the remembered queue
+        reviewEl.innerHTML = '';
+        logEl.innerHTML = '';
+        bar.style.width = '0%';
+        barWrap.hidden = false;
+        startBtn.disabled = true;
+        resync.disabled = true;
+        langMode.disabled = true;
+        cancelBtn.hidden = false;
+        cancelBtn.disabled = false;
+        statusEl.textContent = 'Starting…';
+
+        offProgress = EventsOn('autotag:progress', (p: ATProgress) => {
+            const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+            bar.style.width = pct + '%';
+            statusEl.textContent = `${p.done} / ${p.total} — ${p.title}`;
+            const label = p.outcome === 'applied' ? `✓ ${p.title} → ${p.detail}`
+                : p.outcome === 'review' ? `? ${p.title} — needs review`
+                : p.outcome === 'none' ? `– ${p.title} — no match`
+                : `✗ ${p.title} — ${p.detail}`;
+            logLine(p.outcome, label);
+        });
+        offDone = EventsOn('autotag:done', (d: ATDone) => {
+            detach();
+            cancelBtn.hidden = true;
+            startBtn.disabled = false;
+            resync.disabled = false;
+            langMode.disabled = false;
+            bar.style.width = '100%';
+            statusEl.textContent = `${d.cancelled ? 'Cancelled' : 'Done'} — ${d.applied} auto-applied, ${d.needs_review.length} need review`;
+            reviewCache = { items: d.needs_review.slice(), applied: d.applied, cancelled: d.cancelled };
+            renderReviewQueue(reviewEl, reviewCache.items, removeFromReviewCache);
+            toast(d.cancelled ? 'Auto-tag cancelled' : 'Auto-tag finished');
+        });
+
+        try {
+            await StartAutoTag({ resync: resync.checked, language_mode: langMode.value });
+        } catch (err) {
+            console.error(err);
+            detach();
+            cancelBtn.hidden = true;
+            startBtn.disabled = false;
+            resync.disabled = false;
+            langMode.disabled = false;
+            barWrap.hidden = true;
+            toast(nhErr(err), 'err');
+        }
+    });
+
+    cancelBtn.addEventListener('click', () => {
+        cancelBtn.disabled = true;
+        statusEl.textContent = 'Cancelling…';
+        CancelAutoTag();
+    });
+
+    viewCleanup = () => { detach(); };
 }
 
 // ───── init ───────────────────────────────────────────────────────

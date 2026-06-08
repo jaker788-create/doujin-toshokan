@@ -18,6 +18,10 @@ frontend/package.json.md5
 .doujin/
 *.db
 
+# Secrets: the nhentai API key now lives in %APPDATA%/doujin/config.json, entered
+# in-app. This throwaway file must never be committed.
+API_KEY.txt
+
 # Local Claude Code / harness state and AI dev-workflow scaffolding
 # (this is an app-only public repo; see the "app-only" scope decision)
 .claude/

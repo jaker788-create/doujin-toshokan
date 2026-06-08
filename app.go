@@ -5,16 +5,20 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"doujin/internal/config"
+	"doujin/internal/doujin"
 	"doujin/internal/ingest"
 	"doujin/internal/scanner"
 	"doujin/internal/search"
 	"doujin/internal/stash"
 	"doujin/internal/store"
+	"doujin/internal/tag"
 )
 
 // pageSize is the default number of cards a search returns (matches the Python
@@ -28,6 +32,11 @@ type App struct {
 	ctx     context.Context
 	dataDir string
 	db      *sql.DB
+
+	// autotagMu guards autotagCancel, the cancel func for an in-flight bulk
+	// auto-tag run. nil means no run is active; see nhentai.go.
+	autotagMu     sync.Mutex
+	autotagCancel context.CancelFunc
 }
 
 // NewApp creates the App. The database is opened later in startup, once Wails has
@@ -156,7 +165,7 @@ func (a *App) Search(args SearchArgs) ([]search.Manga, error) {
 type MangaDetail struct {
 	Manga   search.Manga `json:"manga"`
 	Pages   []string     `json:"pages"`
-	Tags    []string     `json:"tags"`
+	Tags    []tag.Typed  `json:"tags"`
 	Missing bool         `json:"missing"`
 }
 
@@ -175,7 +184,7 @@ func (a *App) GetManga(id int64) (*MangaDetail, error) {
 	if !missing {
 		pages = scanner.ListPages(m.FolderPath)
 	}
-	tags, err := search.GetMangaTags(a.db, id)
+	tags, err := search.GetMangaTagsTyped(a.db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -192,9 +201,12 @@ func (a *App) SuggestAuthors(q string) ([]search.Author, error) {
 	return search.SuggestAuthors(a.db, q, 10)
 }
 
-// UpdateTags replaces a manga's tags and returns the saved (normalized, sorted)
-// set so the UI can re-render its chips. Errors if the manga no longer exists.
-func (a *App) UpdateTags(id int64, tags []string) ([]string, error) {
+// UpdateTags replaces a manga's tags and returns the saved set (with subjects,
+// ordered) so the UI can re-render its grouped chips. The incoming names are freeform
+// manual edits (General subject); any that match an existing typed tag keep that tag's
+// subject (GetOrCreateTag never downgrades), so editing tags by name doesn't strip the
+// subjects that nhentai or the folder parser assigned. Errors if the manga is gone.
+func (a *App) UpdateTags(id int64, tags []string) ([]tag.Typed, error) {
 	m, err := search.GetManga(a.db, id)
 	if err != nil {
 		return nil, err
@@ -202,30 +214,119 @@ func (a *App) UpdateTags(id int64, tags []string) ([]string, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manga %d not found", id)
 	}
-	return ingest.SetMangaTags(a.db, id, tags)
+	return ingest.SetMangaTags(a.db, id, generalTags(tags))
 }
 
 // GetUnimported returns title folders found under the library roots that are not
 // yet in the database.
-func (a *App) GetUnimported() ([]scanner.DetectedFolder, error) {
+func (a *App) GetUnimported() ([]UnimportedPreview, error) {
 	known, err := a.knownPaths()
 	if err != nil {
 		return nil, err
 	}
-	return scanner.FindUnimported(a.roots(), known), nil
+	found := scanner.FindUnimported(a.roots(), known)
+	out := make([]UnimportedPreview, 0, len(found))
+	for _, d := range found {
+		// Reuse the exact import path so the preview equals what Ingest will store.
+		in := mangaInputFromFolder(d, nil)
+		out = append(out, UnimportedPreview{
+			Folder: d,
+			Title:  in.Title,
+			Author: in.Author,
+			Tags:   in.Tags,
+		})
+	}
+	return out, nil
+}
+
+// mangaInputFromFolder builds an ingest input from a detected folder. It parses the
+// *on-disk folder name* (folder_path's basename — the immutable source of truth, the
+// same string Rescan re-derives from) rather than d.Title, so the implied tags
+// (language, parody, misc — see internal/doujin) and derived author are always taken
+// from the real decorated name even when the UI has replaced d.Title with the cleaned
+// display title. Tags merge with any user-supplied tags.
+//
+//   - Title: the cleaned display title, unless d.Title has been changed from the raw
+//     folder name (i.e. edited in the Scan row), in which case that edit wins.
+//   - Author: the author folder when present (organized layout / UI-provided),
+//     otherwise the artist/circle parsed from the name, otherwise "Unknown".
+func mangaInputFromFolder(d scanner.DetectedFolder, extraTags []string) ingest.MangaInput {
+	rawName := filepath.Base(d.FolderPath)
+	p := doujin.ParseName(rawName)
+
+	title := p.DisplayTitle()
+	if strings.TrimSpace(title) == "" {
+		title = rawName
+	}
+	// Honor a deliberate title edit from the Scan row: d.Title differs from the raw
+	// folder name only when the user (or the preview) supplied a different value.
+	if t := strings.TrimSpace(d.Title); t != "" && t != rawName {
+		title = t
+	}
+
+	author := strings.TrimSpace(d.Author)
+	if author == "" {
+		if author = p.Author(); author == "" {
+			author = "Unknown"
+		}
+	}
+
+	tags := append(parsedTypedTags(p), generalTags(extraTags)...)
+	return ingest.MangaInput{
+		Title:        title,
+		Author:       author,
+		FolderPath:   d.FolderPath,
+		CoverRelPath: d.CoverRelPath,
+		PageCount:    d.PageCount,
+		Tags:         tags,
+	}
+}
+
+// parsedTypedTags maps a parsed folder name's decorations onto subjected tags: the
+// language as a Language tag, each parody as a Parody tag, and the misc content tags
+// (digital, decensored, …) as generic Tag-subject tags. The doujin parser stays pure
+// (it knows the parts but not our subject vocabulary); this is where the two meet.
+func parsedTypedTags(p doujin.Parsed) []tag.Typed {
+	var out []tag.Typed
+	add := func(name, typ string) {
+		if name = ingest.NormalizeTag(name); name != "" {
+			out = append(out, tag.Typed{Name: name, Type: typ})
+		}
+	}
+	add(p.Language, tag.Language)
+	for _, parody := range p.Parodies {
+		add(parody, tag.Parody)
+	}
+	for _, m := range p.MiscTags {
+		add(m, tag.Tag)
+	}
+	return out
+}
+
+// generalTags wraps freeform tag names (from the UI) as untyped/General tags.
+func generalTags(names []string) []tag.Typed {
+	out := make([]tag.Typed, 0, len(names))
+	for _, n := range names {
+		out = append(out, tag.Typed{Name: n, Type: tag.General})
+	}
+	return out
+}
+
+// UnimportedPreview pairs a detected folder with the parse of its name, so the Scan
+// page can show — and pre-fill — the cleaned title, derived author, and implied tags
+// (with their subjects) that importing it will produce, instead of the raw decorated
+// folder name. Folder is passed straight back to Ingest when the user saves the row.
+type UnimportedPreview struct {
+	Folder scanner.DetectedFolder `json:"folder"`
+	Title  string                 `json:"title"`  // cleaned display title
+	Author string                 `json:"author"` // derived author (folder, else artist/circle)
+	Tags   []tag.Typed            `json:"tags"`   // subjected tags implied by the name
 }
 
 // Ingest imports one detected folder (optionally with tags). A folder already
 // imported (duplicate folder_path) is silently skipped, as in the Python build.
 func (a *App) Ingest(d scanner.DetectedFolder, tags []string) error {
-	_, err := ingest.IngestManga(a.db, ingest.MangaInput{
-		Title:        d.Title,
-		Author:       d.Author,
-		FolderPath:   d.FolderPath,
-		CoverRelPath: d.CoverRelPath,
-		PageCount:    d.PageCount,
-		Tags:         tags,
-	})
+	_, err := ingest.IngestManga(a.db, mangaInputFromFolder(d, tags))
 	if isUniqueViolation(err) {
 		return nil
 	}
@@ -239,13 +340,7 @@ func (a *App) ImportAll() error {
 		return err
 	}
 	for _, d := range scanner.FindUnimported(a.roots(), known) {
-		_, err := ingest.IngestManga(a.db, ingest.MangaInput{
-			Title:        d.Title,
-			Author:       d.Author,
-			FolderPath:   d.FolderPath,
-			CoverRelPath: d.CoverRelPath,
-			PageCount:    d.PageCount,
-		})
+		_, err := ingest.IngestManga(a.db, mangaInputFromFolder(d, nil))
 		if err != nil && !isUniqueViolation(err) {
 			return err
 		}
@@ -254,7 +349,9 @@ func (a *App) ImportAll() error {
 }
 
 // Rescan re-checks every imported title against the disk: folders gone missing are
-// flagged, present ones have their page_count refreshed. Rows are fully read
+// flagged, present ones have their page_count refreshed, their display title
+// re-derived from the (raw) folder name, and the tags implied by that name added
+// (additively — manual and nhentai tags are never removed). Rows are fully read
 // before any UPDATE because the single shared connection cannot iterate and write
 // at once.
 func (a *App) Rescan() error {
@@ -289,11 +386,79 @@ func (a *App) Rescan() error {
 			continue
 		}
 		n := len(scanner.ListPages(r.path))
-		if _, err := a.db.Exec("UPDATE manga SET missing=0, page_count=? WHERE id=?", n, r.id); err != nil {
+		p := doujin.ParseName(filepath.Base(r.path))
+		title := p.DisplayTitle()
+		if strings.TrimSpace(title) == "" {
+			title = filepath.Base(r.path)
+		}
+		if _, err := a.db.Exec(
+			"UPDATE manga SET missing=0, page_count=?, title=? WHERE id=?", n, title, r.id); err != nil {
 			return err
+		}
+		// Additively apply the tags implied by the folder name, with their subjects.
+		// INSERT OR IGNORE keeps it idempotent and never disturbs existing
+		// (manual/nhentai) tags; GetOrCreateTag also backfills the subject onto any tag
+		// row that was still untyped, so Rescan upgrades a pre-subjects library in place.
+		for _, raw := range parsedTypedTags(p) {
+			name := ingest.NormalizeTag(raw.Name)
+			if name == "" {
+				continue
+			}
+			tagID, err := ingest.GetOrCreateTag(a.db, name, raw.Type)
+			if err != nil {
+				return err
+			}
+			if _, err := a.db.Exec(
+				"INSERT OR IGNORE INTO manga_tags(manga_id, tag_id) VALUES (?,?)", r.id, tagID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// CountMissing reports how many imported titles point at a folder that is gone from
+// disk (flagged by Rescan). Drives the Scan-page cleanup affordance.
+func (a *App) CountMissing() (int, error) {
+	var n int
+	err := a.db.QueryRow("SELECT COUNT(*) FROM manga WHERE missing=1").Scan(&n)
+	return n, err
+}
+
+// RemoveMissing forgets every title flagged missing (its row, tag links, and saved
+// pages cascade via the schema's ON DELETE CASCADE), then prunes any author left with
+// no titles. Returns how many titles were removed. Files on disk are never touched —
+// this only clears DB rows whose folders you deliberately moved or deleted, which the
+// index-in-place rule otherwise keeps around forever (so an unplugged drive can't erase
+// your metadata).
+func (a *App) RemoveMissing() (int, error) {
+	res, err := a.db.Exec("DELETE FROM manga WHERE missing=1")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if err := a.pruneOrphanAuthors(); err != nil {
+		return int(n), err
+	}
+	return int(n), nil
+}
+
+// DeleteManga forgets one title by id (row + tag links + saved pages cascade), then
+// prunes a now-empty author. Files are untouched; if the folder still exists it will be
+// offered for import again on the next scan.
+func (a *App) DeleteManga(id int64) error {
+	if _, err := a.db.Exec("DELETE FROM manga WHERE id=?", id); err != nil {
+		return err
+	}
+	return a.pruneOrphanAuthors()
+}
+
+// pruneOrphanAuthors removes authors left with no titles so the author filter stays
+// free of dead entries. An author is re-created automatically on the next import, so
+// this is safe to run after any deletion.
+func (a *App) pruneOrphanAuthors() error {
+	_, err := a.db.Exec("DELETE FROM authors WHERE id NOT IN (SELECT author_id FROM manga)")
+	return err
 }
 
 // GetConfig returns the current configuration (library roots, port).

@@ -1,6 +1,7 @@
-// Package scanner walks an author/title/*.images library on disk and detects
-// importable title folders. It is the Go port of doujin/scanner.py, including the
-// natural-sort ordering ("2" before "10") that the page reader depends on.
+// Package scanner walks a library on disk and detects importable title folders. It
+// supports both the organized author/title/*.images layout and raw title folders
+// dropped straight in a root (see ScanRoot). It is the Go port of doujin/scanner.py,
+// including the natural-sort ordering ("2" before "10") that the page reader depends on.
 package scanner
 
 import (
@@ -118,10 +119,10 @@ func ListPages(folder string) []string {
 	return files
 }
 
-// DetectFolder inspects a single title folder, returning nil when it holds no
-// images. Author is the parent directory name, title the folder name, and the
-// cover is the first page.
-func DetectFolder(folder string) *DetectedFolder {
+// detect builds a DetectedFolder for a single title folder, returning nil when it
+// holds no images. The caller supplies the author (the parent dir for the organized
+// layout, or "" for a raw title that has no author folder above it).
+func detect(folder, author string) *DetectedFolder {
 	pages := ListPages(folder)
 	if len(pages) == 0 {
 		return nil
@@ -129,11 +130,34 @@ func DetectFolder(folder string) *DetectedFolder {
 	cover := filepath.Base(pages[0])
 	return &DetectedFolder{
 		FolderPath:   folder,
-		Author:       filepath.Base(filepath.Dir(folder)),
+		Author:       author,
 		Title:        filepath.Base(folder),
 		PageCount:    len(pages),
 		CoverRelPath: &cover,
 	}
+}
+
+// DetectFolder inspects a single title folder, returning nil when it holds no
+// images. Author is the parent directory name, title the folder name, and the
+// cover is the first page.
+func DetectFolder(folder string) *DetectedFolder {
+	return detect(folder, filepath.Base(filepath.Dir(folder)))
+}
+
+// hasSubdirs reports whether folder contains at least one child directory. It is the
+// signal ScanRoot uses to tell an author folder (has title subfolders) from a raw
+// title folder (only image files). An unreadable folder is treated as having none.
+func hasSubdirs(folder string) bool {
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedSubdirs(folder string) []string {
@@ -153,18 +177,36 @@ func sortedSubdirs(folder string) []string {
 	return dirs
 }
 
-// ScanRoot walks root/<author>/<title>/ and detects title folders with images.
-// Unreadable directories are skipped rather than aborting the whole scan.
+// ScanRoot detects importable title folders under root, supporting two layouts in
+// the same root at once:
+//
+//   - Organized: root/<author>/<title>/images — a top-level folder that contains
+//     subfolders is an author; each subfolder is a title (its author is the folder).
+//   - Raw: root/<title>/images — a top-level folder with no subfolders is itself a
+//     title dropped straight in the root. It has no author folder, so its Author is
+//     left empty for the importer to derive from the (decorated) folder name.
+//
+// The two are told apart by whether the top-level folder has subfolders, matching
+// how the library is actually organized on disk. Unreadable directories are skipped
+// rather than aborting the whole scan.
 func ScanRoot(root string) []DetectedFolder {
 	results := []DetectedFolder{}
 	if _, err := os.Stat(root); err != nil {
 		return results
 	}
-	for _, authorDir := range sortedSubdirs(root) {
-		for _, titleDir := range sortedSubdirs(authorDir) {
-			if d := DetectFolder(titleDir); d != nil {
-				results = append(results, *d)
+	for _, entry := range sortedSubdirs(root) {
+		if hasSubdirs(entry) {
+			// Organized author folder: each subfolder is a title.
+			for _, titleDir := range sortedSubdirs(entry) {
+				if d := DetectFolder(titleDir); d != nil {
+					results = append(results, *d)
+				}
 			}
+			continue
+		}
+		// Raw title sitting directly in the root: no author folder above it.
+		if d := detect(entry, ""); d != nil {
+			results = append(results, *d)
 		}
 	}
 	return results

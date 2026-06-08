@@ -22,7 +22,7 @@ build/bin/doujin.exe  (single static binary)
 ├── main.go        Wails window + //go:embed frontend/dist + Bind(app) + AssetServer.Handler
 ├── app.go         App struct — exported methods = the typed frontend API
 ├── assets.go      http.Handler for /image and /thumb (path-guarded binary serving)
-└── internal/      config · store(db) · scanner · ingest · search · thumbs · paths
+└── internal/      config · store(db) · scanner · ingest · search · tag · thumbs · paths
         │ WebView2
         ▼
    frontend/src/main.ts  ── bound methods (typed JSON) ──▶  app.go
@@ -138,8 +138,9 @@ Backend packages under `internal/`. Each has one responsibility.
 | `store` | Connection (`modernc.org/sqlite`, FK on, single conn), schema, and the **migration ladder** (`migrations`, `Init`). Exposes a `Querier` interface satisfied by `*sql.DB` and `*sql.Tx`. |
 | `scanner` | Walk library roots, detect un-imported title folders, list + natural-sort pages. Derives content from disk. |
 | `thumbs` | `imaging` thumbnail generation + disk cache (atomic, placeholder fallback). |
-| `ingest` | Create/link author, manga row, and tags. `NormalizeTag`, dedupe, transactional. |
-| `search` | The read chokepoint: `SearchManga`, suggestions, tag/author/manga lookups, and the `Manga`/`Author`/`Tag` row types. |
+| `ingest` | Create/link author, manga row, and tags. `NormalizeTag`, dedupe, transactional. `GetOrCreateTag(name, subject)` enriches a tag's subject (upgrade, **never downgrade**), so re-saving a typed tag by name keeps its subject. |
+| `search` | The read chokepoint: `SearchManga`, suggestions, tag/author/manga lookups (incl. `GetMangaTagsTyped` for the subject-grouped detail view), and the `Manga`/`Author`/`Tag` row types. |
+| `tag` | Leaf vocabulary package: the canonical tag **subjects** (`language`, `artist`, `group`, `parody`, `character`, `category`, `tag`, plus `General`) — the same set nhentai uses — with `Typed{Name,Type}`, `Normalize`, `Label`, `Rank`, `Sort`. Shared by the parser-mapping, ingest, search, and nhentai layers with no import cycle. |
 | `paths` | `IsWithinRoots` path-traversal guard. |
 | `stash` | Saved pages ("tabs"): CRUD over the `stash` table. An entry is a `hash` + `label` + `kind` (`search`\|`title`); title entries `LEFT JOIN manga`/`authors` for card display and own a `last_page` resume position (`ON DELETE CASCADE` with `manga`). Uses the `store.Querier` style. |
 

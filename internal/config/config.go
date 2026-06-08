@@ -15,6 +15,12 @@ import (
 type Config struct {
 	LibraryRoots []string `json:"library_roots"`
 	Port         int      `json:"port"`
+	// NhentaiAPIKey is the user's personal nhentai API key, entered in-app (never
+	// hardcoded or committed). Empty disables the auto-tag features. NhentaiUserAgent
+	// is the descriptive User-Agent nhentai asks clients to send; empty falls back to
+	// a built-in default in app.go.
+	NhentaiAPIKey    string `json:"nhentai_api_key"`
+	NhentaiUserAgent string `json:"nhentai_user_agent"`
 }
 
 // DefaultDataDir returns %APPDATA%/doujin on Windows. os.UserConfigDir reports the
@@ -42,8 +48,10 @@ func Load(dataDir string) (Config, error) {
 		return cfg, err
 	}
 	var raw struct {
-		LibraryRoots []string `json:"library_roots"`
-		Port         *int     `json:"port"`
+		LibraryRoots     []string `json:"library_roots"`
+		Port             *int     `json:"port"`
+		NhentaiAPIKey    *string  `json:"nhentai_api_key"`
+		NhentaiUserAgent *string  `json:"nhentai_user_agent"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return cfg, err
@@ -53,6 +61,12 @@ func Load(dataDir string) (Config, error) {
 	}
 	if raw.Port != nil {
 		cfg.Port = *raw.Port
+	}
+	if raw.NhentaiAPIKey != nil {
+		cfg.NhentaiAPIKey = *raw.NhentaiAPIKey
+	}
+	if raw.NhentaiUserAgent != nil {
+		cfg.NhentaiUserAgent = *raw.NhentaiUserAgent
 	}
 	return cfg, nil
 }
