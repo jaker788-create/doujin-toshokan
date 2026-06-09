@@ -1,7 +1,7 @@
 import './theme.css';
 import {
-    Search, Count, GetManga, GetAuthor, SuggestTags, SuggestAuthors,
-    UpdateTags, GetUnimported, Ingest, ImportAll, Rescan,
+    Search, Count, GetManga, GetAuthor, SuggestTags, SuggestTagsTyped, SuggestAuthors,
+    UpdateTags, SetDisplayTitle, GetUnimported, Ingest, ImportAll, Rescan,
     CountMissing, RemoveMissing, DeleteManga,
     GetConfig, AddLibraryRoot, RemoveLibraryRoot,
     StashSave, StashList, StashGet, StashSetPage, StashRemove,
@@ -13,6 +13,13 @@ import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
 
 type Manga = search.Manga;
 type MangaDetail = main.MangaDetail;
+
+// The title shown to the user: a user-set display override when present, else the
+// canonical (folder-parsed) title. The canonical title is what nhentai matching uses, so
+// the override is purely cosmetic — see SetDisplayTitle in app.go.
+function displayTitle(m: Manga): string {
+    return (m.display_title && m.display_title.trim()) || m.title;
+}
 type UnimportedPreview = main.UnimportedPreview;
 type Typed = tag.Typed;
 
@@ -59,10 +66,27 @@ function renderTagChips(tags: Typed[]): string {
         + `</span>`).join('');
 }
 
-// tagNames extracts the plain names (for the freeform edit input).
-function tagNames(tags: Typed[]): string[] {
-    return tags.map((t) => t.name);
+// TAG_SUBJECT_OPTIONS are the subjects the tag editor's dropdown offers, in display
+// rank order with General ("") last. The values match internal/tag's subject strings.
+const TAG_SUBJECT_OPTIONS: { value: string; label: string }[] = [
+    { value: 'language', label: 'Language' }, { value: 'artist', label: 'Artist' },
+    { value: 'group', label: 'Group' }, { value: 'parody', label: 'Parody' },
+    { value: 'character', label: 'Character' }, { value: 'category', label: 'Category' },
+    { value: 'tag', label: 'Tags' }, { value: '', label: 'General' },
+];
+
+// renderEditChips renders the editable working set as removable chips, grouped by
+// subject (same grouping as the read-only row). Each chip carries its name + subject
+// in data-* so the remove handler and the save payload can read them back.
+function renderEditChips(tags: Typed[]): string {
+    return groupBySubject(tags).map((g) =>
+        `<span class="tag-group"><span class="tag-subject">${esc(g.label)}</span>`
+        + g.tags.map((t) =>
+            `<span class="chip" data-name="${esc(t.name)}" data-type="${esc(t.type)}">${esc(t.name)}`
+            + `<button type="button" class="chip-x" aria-label="remove ${esc(t.name)}">×</button></span>`).join('')
+        + `</span>`).join('');
 }
+
 type StashEntry = stash.Entry;
 
 const PAGE_SIZE = 60;
@@ -248,7 +272,7 @@ function cardHtml(m: Manga): string {
     return `<div class="card${m.missing ? ' missing' : ''}">
         <a class="card-main" href="#/manga/${m.id}">
             <div class="card-cover">${cover}</div>
-            <div class="meta"><span class="t">${esc(m.title)}</span></div>
+            <div class="meta"><span class="t">${esc(displayTitle(m))}</span></div>
         </a>
         <a class="a author-link" href="#/?author=${m.author_id}" data-author-name="${esc(m.author_name)}">${esc(m.author_name)}</a>
     </div>`;
@@ -550,13 +574,30 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
     <a class="back-link" href="${esc(backHref)}">${esc(backLabel)}</a>
     <a class="reader-back" href="${esc(backHref)}" aria-label="${esc(backLabel)}" title="${esc(backLabel)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></a>
     <header class="title-header">
-        <h1>${esc(m.title)}</h1>
+        <div class="title-edit" data-manga="${m.id}">
+            <h1 class="title-text">${esc(displayTitle(m))}</h1>
+            <button type="button" class="title-edit-toggle" title="Edit display title" aria-label="Edit display title">✎</button>
+            <form class="title-edit-form" hidden>
+                <input class="title-input" value="${esc(displayTitle(m))}" aria-label="Display title" autocomplete="off">
+                <button type="submit" class="btn btn-primary">Save</button>
+                <button type="button" class="btn title-edit-cancel">Cancel</button>
+                <button type="button" class="btn title-edit-revert" title="Clear the override and show the original name">Revert</button>
+            </form>
+            <p class="title-canonical"${m.display_title && m.display_title.trim() ? '' : ' hidden'}>original: ${esc(m.title)}</p>
+        </div>
         <p class="byline">by <a class="author author-link" href="#/?author=${m.author_id}" data-author-name="${esc(m.author_name)}">${esc(m.author_name)}</a><span class="sep">·</span>${m.page_count} pages</p>
         <div class="tags-block" data-manga="${m.id}">
             <p class="tagrow" id="tagrow">${tagrow}</p>
             <form class="tag-edit" hidden>
-                <input class="tag-input" name="tags" value="${esc(tagNames(d.tags).join(', '))}" placeholder="comma, separated, tags" autocomplete="off" list="tag-suggest">
-                <datalist id="tag-suggest"></datalist>
+                <div class="tag-edit-chips"></div>
+                <div class="tag-edit-row">
+                    <select class="tag-subject-select" aria-label="Tag subject">
+                        ${TAG_SUBJECT_OPTIONS.map((o) =>
+                            `<option value="${esc(o.value)}"${o.value === '' ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
+                    </select>
+                    <input class="tag-input" name="tags" placeholder="add tag, Enter or comma" autocomplete="off" list="tag-suggest">
+                    <datalist id="tag-suggest"></datalist>
+                </div>
                 <div class="tag-edit-actions">
                     <button type="submit" class="btn btn-primary">Save tags</button>
                     <button type="button" class="btn tag-edit-cancel">Cancel</button>
@@ -619,7 +660,7 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     let saveTimer: number | undefined;
 
     // Track the open title so the header save button can stash it with its live page.
-    readerState = { id, title: detail.manga.title, page: 0 };
+    readerState = { id, title: displayTitle(detail.manga), page: 0 };
 
     // Resume affordance for a saved title tab: a dismissable pill that jumps to the
     // page you left off on.
@@ -741,7 +782,8 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     document.addEventListener('keydown', onKey);
 
     pageImgs.forEach((img, i) => img.addEventListener('click', () => openLightbox(pageImgs, i)));
-    wireTagEditor(id);
+    wireTagEditor(id, detail.tags);
+    wireTitleEditor(id, detail.manga);
 
     viewCleanup = () => {
         document.removeEventListener('keydown', onKey);
@@ -758,32 +800,143 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     };
 }
 
-function wireTagEditor(id: number): void {
+// wireTitleEditor wires the inline display-title editor in the title header: a pencil
+// toggles a one-field form; Save persists an override, Revert clears it back to the
+// canonical name. The canonical title (used for nhentai matching) is never written here —
+// only the cosmetic display_title — and the "original:" hint mirrors that distinction.
+function wireTitleEditor(id: number, m: Manga): void {
+    const block = viewEl().querySelector('.title-edit') as HTMLElement | null;
+    if (!block) return;
+    const heading = block.querySelector('.title-text') as HTMLElement;
+    const toggle = block.querySelector('.title-edit-toggle') as HTMLButtonElement;
+    const form = block.querySelector('.title-edit-form') as HTMLFormElement;
+    const input = block.querySelector('.title-input') as HTMLInputElement;
+    const cancel = block.querySelector('.title-edit-cancel') as HTMLButtonElement;
+    const revert = block.querySelector('.title-edit-revert') as HTMLButtonElement;
+    const canonical = block.querySelector('.title-canonical') as HTMLElement;
+
+    const open = (yes: boolean) => {
+        form.hidden = !yes;
+        heading.hidden = yes;
+        toggle.hidden = yes;
+        if (yes) {
+            input.value = heading.textContent ?? '';
+            input.focus();
+            input.select();
+        }
+    };
+
+    // Re-render after the backend returns the saved row: the heading shows the effective
+    // title, the "original" hint appears only while an override differs from the canonical
+    // title, and the open title tab (stash label) tracks the new display name.
+    const apply = (saved: Manga) => {
+        const shown = displayTitle(saved);
+        heading.textContent = shown;
+        const overridden = !!(saved.display_title && saved.display_title.trim());
+        canonical.hidden = !overridden;
+        canonical.textContent = 'original: ' + saved.title;
+        revert.hidden = !overridden;
+        if (readerState && readerState.id === id) readerState.title = shown;
+        open(false);
+    };
+
+    const save = async (value: string) => {
+        try {
+            const saved = await SetDisplayTitle(id, value);
+            apply(saved);
+            toast('Title saved');
+        } catch (err) {
+            console.error(err);
+            toast('Could not save title', 'err');
+        }
+    };
+
+    revert.hidden = !(m.display_title && m.display_title.trim());
+    toggle.addEventListener('click', () => open(true));
+    cancel.addEventListener('click', () => open(false));
+    revert.addEventListener('click', () => save(''));
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        void save(input.value);
+    });
+}
+
+function wireTagEditor(id: number, initial: Typed[]): void {
     const block = viewEl().querySelector('.tags-block') as HTMLElement | null;
     if (!block) return;
     const toggle = block.querySelector('.tag-edit-toggle') as HTMLButtonElement;
     const form = block.querySelector('.tag-edit') as HTMLFormElement;
     const cancel = block.querySelector('.tag-edit-cancel') as HTMLButtonElement;
     const input = block.querySelector('.tag-input') as HTMLInputElement;
+    const subjectSel = block.querySelector('.tag-subject-select') as HTMLSelectElement;
+    const chips = block.querySelector('.tag-edit-chips') as HTMLElement;
     const row = block.querySelector('#tagrow') as HTMLElement;
     const datalist = block.querySelector('#tag-suggest') as HTMLDataListElement;
 
-    // Render a saved (subject-ordered) tag list into the row, the edit input, and the
-    // toggle label. Shared by the manual save and the nhentai apply flows. The row
-    // shows grouped subjects; the input stays a flat, editable list of names.
+    // savedTags mirrors what is persisted (and shown in the read-only row); working is
+    // the editor's in-progress copy, identified by name only (matching the backend's
+    // de-dupe). Opening the editor reseeds working from savedTags; cancel discards it.
+    let savedTags: Typed[] = initial.slice();
+    let working: Typed[] = savedTags.slice();
+    // Latest autocomplete suggestions (name -> stored subject), used to auto-fill the
+    // subject when the user adds an existing tag without picking one.
+    const suggMap = new Map<string, string>();
+
+    const renderChips = () => { chips.innerHTML = renderEditChips(working); };
+
+    // Render a saved (subject-ordered) tag set into the read-only row + toggle label and
+    // resync the editor state. Shared by the manual save and the nhentai apply flows, so
+    // applying tags while the editor is open keeps the chips in step.
     const renderTags = (saved: Typed[]) => {
-        input.value = tagNames(saved).join(', ');
+        savedTags = saved.slice();
+        working = saved.slice();
         row.innerHTML = renderTagRow(saved);
         toggle.textContent = saved.length ? 'Edit tags' : '+ Add tags';
+        renderChips();
+    };
+
+    // addFromInput commits the input buffer: each comma-separated name not already in
+    // working is added under the selected subject (or an existing tag's own subject when
+    // the select is left on General and the name matches a suggestion).
+    const addFromInput = () => {
+        const parts = input.value.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+        for (const name of parts) {
+            if (working.some((t) => t.name === name)) continue;
+            let type = subjectSel.value;
+            if (type === '' && suggMap.has(name)) type = suggMap.get(name)!;
+            working.push(new tag.Typed({ name, type }));
+        }
+        input.value = '';
+        renderChips();
     };
 
     toggle.addEventListener('click', () => {
+        working = savedTags.slice();
+        renderChips();
         form.hidden = false;
         toggle.hidden = true;
         input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
     });
     cancel.addEventListener('click', () => { form.hidden = true; toggle.hidden = false; });
+
+    // Enter / comma commit the typed buffer as chip(s) without submitting the form (only
+    // the Save button submits).
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ',') {
+            e.preventDefault();
+            addFromInput();
+        }
+    });
+
+    // Remove a chip by clicking its ×, via delegation on the chips container.
+    chips.addEventListener('click', (e) => {
+        const x = (e.target as HTMLElement).closest('.chip-x');
+        if (!x) return;
+        const name = (x.closest('.chip') as HTMLElement | null)?.dataset.name;
+        if (name == null) return;
+        working = working.filter((t) => t.name !== name);
+        renderChips();
+    });
 
     let timer: number | undefined;
     input.addEventListener('input', () => {
@@ -792,19 +945,20 @@ function wireTagEditor(id: number): void {
         window.clearTimeout(timer);
         timer = window.setTimeout(async () => {
             try {
-                const names = await SuggestTags(token);
-                datalist.innerHTML = names.map((n) => `<option value="${esc(n)}">`).join('');
+                const sugg = await SuggestTagsTyped(token);
+                sugg.forEach((s) => suggMap.set(s.name, s.type));
+                datalist.innerHTML = sugg.map((s) => `<option value="${esc(s.name)}">`).join('');
             } catch { /* best-effort */ }
         }, 150);
     });
 
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
+        addFromInput(); // flush any pending typed text
         const btn = form.querySelector('button[type=submit]') as HTMLButtonElement;
         btn.disabled = true;
         try {
-            const requested = input.value.split(',').map((t) => t.trim()).filter(Boolean);
-            const saved = await UpdateTags(id, requested); // server normalizes + sorts
+            const saved = await UpdateTags(id, working); // server normalizes + sorts
             renderTags(saved);
             form.hidden = true;
             toggle.hidden = false;
@@ -1432,7 +1586,18 @@ function renderReviewQueue(
     head.className = 'at-review-head';
     head.textContent = `Needs review (${items.length})`;
     container.appendChild(head);
+    // Items arrive grouped by artist from the sweep (ORDER BY a.name); emit a subheader
+    // whenever the artist changes so the queue reads as one block per artist.
+    let lastArtist: string | null = null;
     items.forEach((res) => {
+        const artist = res.local_author || 'Unknown';
+        if (artist !== lastArtist) {
+            lastArtist = artist;
+            const sub = document.createElement('h3');
+            sub.className = 'at-review-artist';
+            sub.textContent = artist;
+            container.appendChild(sub);
+        }
         const card = document.createElement('div');
         card.className = 'at-review-card';
         card.innerHTML = `<div class="at-review-title">
@@ -1526,8 +1691,8 @@ async function renderAutotag(): Promise<void> {
             bar.style.width = pct + '%';
             statusEl.textContent = `${p.done} / ${p.total} — ${p.title}`;
             const label = p.outcome === 'applied' ? `✓ ${p.title} → ${p.detail}`
-                : p.outcome === 'review' ? `? ${p.title} — needs review`
-                : p.outcome === 'none' ? `– ${p.title} — no match`
+                : p.outcome === 'review' ? `? ${p.title} — needs review${p.detail ? ' · ' + p.detail : ''}`
+                : p.outcome === 'none' ? `– ${p.title} — no match${p.detail ? ' · ' + p.detail : ''}`
                 : `✗ ${p.title} — ${p.detail}`;
             logLine(p.outcome, label);
         });

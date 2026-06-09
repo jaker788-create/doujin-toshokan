@@ -9,14 +9,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"doujin/internal/archive"
+	"doujin/internal/imagefile"
 )
 
-var imageExts = map[string]bool{
-	".jpg": true, ".jpeg": true, ".png": true, ".webp": true,
-	".gif": true, ".bmp": true, ".avif": true,
-}
-
-// DetectedFolder describes a title folder found on disk. JSON tags match the
+// DetectedFolder describes a title found on disk — either a folder of loose images
+// or a .cbz/.zip archive (FolderPath is then the archive file). JSON tags match the
 // shape the Python build exposed and the frontend consumes.
 type DetectedFolder struct {
 	FolderPath   string  `json:"folder_path"`
@@ -26,76 +25,10 @@ type DetectedFolder struct {
 	CoverRelPath *string `json:"cover_rel_path"`
 }
 
-// natTok is one token of a natural-sort key: either a run of digits or a run of
-// (lowercased) non-digits, mirroring Python's re.split(r"(\d+)", s) + int/str map.
-type natTok struct {
-	isNum  bool
-	digits string // raw digit run when isNum
-	text   string // lowercased text run otherwise
-}
-
-func tokenize(s string) []natTok {
-	var toks []natTok
-	i := 0
-	for i < len(s) {
-		start := i
-		for i < len(s) && !(s[i] >= '0' && s[i] <= '9') {
-			i++
-		}
-		toks = append(toks, natTok{text: strings.ToLower(s[start:i])})
-		if i >= len(s) {
-			break
-		}
-		start = i
-		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			i++
-		}
-		toks = append(toks, natTok{isNum: true, digits: s[start:i]})
-	}
-	return toks
-}
-
-// compareDigits compares two digit runs by integer value, ignoring leading zeros,
-// without overflow (handles arbitrarily long numbers, like Python's int()).
-func compareDigits(a, b string) int {
-	a = strings.TrimLeft(a, "0")
-	b = strings.TrimLeft(b, "0")
-	if len(a) != len(b) {
-		if len(a) < len(b) {
-			return -1
-		}
-		return 1
-	}
-	return strings.Compare(a, b)
-}
-
-// naturalLess orders strings so embedded numbers sort by value. A shorter key that
-// is a prefix of a longer one sorts first (matching Python list comparison).
-func naturalLess(a, b string) bool {
-	ta, tb := tokenize(a), tokenize(b)
-	n := len(ta)
-	if len(tb) < n {
-		n = len(tb)
-	}
-	for i := 0; i < n; i++ {
-		x, y := ta[i], tb[i]
-		switch {
-		case x.isNum && y.isNum:
-			if c := compareDigits(x.digits, y.digits); c != 0 {
-				return c < 0
-			}
-		case !x.isNum && !y.isNum:
-			if x.text != y.text {
-				return x.text < y.text
-			}
-		default:
-			// Token kinds differ at this position (should not happen for aligned
-			// splits); define a stable order so sorting never panics.
-			return x.isNum
-		}
-	}
-	return len(ta) < len(tb)
-}
+// naturalLess orders strings so embedded numbers sort by value (2 before 10). It is
+// the shared imagefile ordering; kept as a package alias because folder sorting and
+// the existing tests call it directly.
+func naturalLess(a, b string) bool { return imagefile.NaturalLess(a, b) }
 
 // ListPages returns the image files directly inside folder, natural-sorted by
 // filename. An unreadable folder yields an empty slice rather than an error.
@@ -109,7 +42,7 @@ func ListPages(folder string) []string {
 		if e.IsDir() {
 			continue
 		}
-		if imageExts[strings.ToLower(filepath.Ext(e.Name()))] {
+		if imagefile.IsImage(e.Name()) {
 			files = append(files, filepath.Join(folder, e.Name()))
 		}
 	}
@@ -144,20 +77,52 @@ func DetectFolder(folder string) *DetectedFolder {
 	return detect(folder, filepath.Base(filepath.Dir(folder)))
 }
 
-// hasSubdirs reports whether folder contains at least one child directory. It is the
-// signal ScanRoot uses to tell an author folder (has title subfolders) from a raw
-// title folder (only image files). An unreadable folder is treated as having none.
-func hasSubdirs(folder string) bool {
-	entries, err := os.ReadDir(folder)
-	if err != nil {
-		return false
+// TitleNameFor returns the basis for a title's display name: a folder's base name,
+// or an archive file's base name with its .cbz/.zip extension stripped. The name
+// parser (doujin.ParseName) derives the title and implied tags from this, so a
+// title stored as a folder and one stored as an archive are named consistently
+// (used by detectArchive here and by app.go's import + rescan paths).
+func TitleNameFor(path string) string {
+	base := filepath.Base(path)
+	if archive.IsArchive(base) {
+		return strings.TrimSuffix(base, filepath.Ext(base))
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			return true
+	return base
+}
+
+// detectArchive builds a DetectedFolder for a single .cbz/.zip file, returning nil
+// when it holds no image entries. FolderPath is the archive file itself; the cover
+// is the first image entry's name (so folder_path + "/" + cover_rel_path is the
+// entry's virtual path, exactly as for a folder title). Author is supplied by the
+// caller (the parent dir for the organized layout, or "" for one dropped raw in a
+// root).
+func detectArchive(archivePath, author string) *DetectedFolder {
+	pages, err := archive.ListPages(archivePath)
+	if err != nil || len(pages) == 0 {
+		return nil
+	}
+	_, cover, _ := archive.SplitArchivePath(pages[0])
+	return &DetectedFolder{
+		FolderPath:   archivePath,
+		Author:       author,
+		Title:        TitleNameFor(archivePath),
+		PageCount:    len(pages),
+		CoverRelPath: &cover,
+	}
+}
+
+// PagesFor lists a title's page paths regardless of how it is stored: the image
+// entries inside a .cbz/.zip (as virtual paths), or the loose image files in a
+// folder. It is the single page-source chokepoint app.go reads through.
+func PagesFor(path string) []string {
+	if archive.IsArchive(path) {
+		pages, err := archive.ListPages(path)
+		if err != nil {
+			return []string{}
 		}
+		return pages
 	}
-	return false
+	return ListPages(path)
 }
 
 func sortedSubdirs(folder string) []string {
@@ -177,35 +142,79 @@ func sortedSubdirs(folder string) []string {
 	return dirs
 }
 
-// ScanRoot detects importable title folders under root, supporting two layouts in
-// the same root at once:
+// sortedArchiveFiles returns the .cbz/.zip files directly inside folder, natural-
+// sorted by name. It is the archive analogue of sortedSubdirs: each such file is a
+// title in its own right. An unreadable folder yields none.
+func sortedArchiveFiles(folder string) []string {
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && archive.IsArchive(e.Name()) {
+			files = append(files, filepath.Join(folder, e.Name()))
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return naturalLess(filepath.Base(files[i]), filepath.Base(files[j]))
+	})
+	return files
+}
+
+// ScanRoot detects importable titles under root, supporting these layouts in the
+// same root at once. A title can be a folder of images or a .cbz/.zip archive:
 //
-//   - Organized: root/<author>/<title>/images — a top-level folder that contains
-//     subfolders is an author; each subfolder is a title (its author is the folder).
-//   - Raw: root/<title>/images — a top-level folder with no subfolders is itself a
-//     title dropped straight in the root. It has no author folder, so its Author is
-//     left empty for the importer to derive from the (decorated) folder name.
+//   - Organized: root/<author>/<title>/images or root/<author>/<title>.cbz — a
+//     top-level folder that contains subfolders OR archive files is an author; each
+//     subfolder and each archive in it is a title (its author is the folder).
+//   - Raw: root/<title>/images or root/<title>.cbz — a top-level folder with only
+//     loose images, or an archive dropped straight in the root, is itself a title
+//     with no author folder above it. Its Author is left empty for the importer to
+//     derive from the (decorated) name.
 //
-// The two are told apart by whether the top-level folder has subfolders, matching
-// how the library is actually organized on disk. Unreadable directories are skipped
-// rather than aborting the whole scan.
+// A folder is treated as an author exactly when it holds subfolders or archives;
+// otherwise its loose images make it a raw title. Unreadable directories are
+// skipped rather than aborting the whole scan.
 func ScanRoot(root string) []DetectedFolder {
 	results := []DetectedFolder{}
 	if _, err := os.Stat(root); err != nil {
 		return results
 	}
-	for _, entry := range sortedSubdirs(root) {
-		if hasSubdirs(entry) {
-			// Organized author folder: each subfolder is a title.
-			for _, titleDir := range sortedSubdirs(entry) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return results
+	}
+	sort.Slice(entries, func(i, j int) bool { return naturalLess(entries[i].Name(), entries[j].Name()) })
+	for _, entry := range entries {
+		full := filepath.Join(root, entry.Name())
+		if !entry.IsDir() {
+			// A bare archive dropped directly in the root is a raw title.
+			if archive.IsArchive(entry.Name()) {
+				if d := detectArchive(full, ""); d != nil {
+					results = append(results, *d)
+				}
+			}
+			continue
+		}
+		subdirs := sortedSubdirs(full)
+		archives := sortedArchiveFiles(full)
+		if len(subdirs) > 0 || len(archives) > 0 {
+			// Organized author folder: its subfolders and archives are its titles.
+			for _, titleDir := range subdirs {
 				if d := DetectFolder(titleDir); d != nil {
+					results = append(results, *d)
+				}
+			}
+			for _, arc := range archives {
+				if d := detectArchive(arc, entry.Name()); d != nil {
 					results = append(results, *d)
 				}
 			}
 			continue
 		}
 		// Raw title sitting directly in the root: no author folder above it.
-		if d := detect(entry, ""); d != nil {
+		if d := detect(full, ""); d != nil {
 			results = append(results, *d)
 		}
 	}

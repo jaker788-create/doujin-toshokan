@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"fmt"
 
+	"doujin/internal/doujin"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -78,6 +80,8 @@ var migrations = []func(*sql.Tx) error{
 	migrate002Stash,
 	migrate003NhentaiLink,
 	migrate004TagType,
+	migrate005CleanAuthorNames,
+	migrate006DisplayTitle,
 }
 
 func migrate001Initial(tx *sql.Tx) error {
@@ -122,6 +126,86 @@ func migrate003NhentaiLink(tx *sql.Tx) error {
 // the DEFAULT so older databases upgrade without touching existing tag rows.
 func migrate004TagType(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE tags ADD COLUMN type TEXT NOT NULL DEFAULT '';`)
+	return err
+}
+
+// migrate005CleanAuthorNames strips a wrapping "(Artist)"/"[Artist]" from stored author
+// names (libraries organized by the parenthesized artist land in the authors table
+// verbatim), so the displayed author and the nhentai auto-tagger both use the bare artist
+// tag. authors.name is UNIQUE and manga.author_id is a foreign key, so a clean that would
+// collide with an existing author must MERGE: the smallest id per cleaned name survives,
+// the rest have their manga repointed and are deleted. Deletes happen before survivor
+// renames so no transient UNIQUE violation occurs. The same doujin.CleanArtist used at
+// ingest is reused so the migration and live cleaning never disagree.
+func migrate005CleanAuthorNames(tx *sql.Tx) error {
+	rows, err := tx.Query("SELECT id, name FROM authors ORDER BY id")
+	if err != nil {
+		return err
+	}
+	type author struct {
+		id   int64
+		name string
+	}
+	var authors []author
+	for rows.Next() {
+		var a author
+		if err := rows.Scan(&a.id, &a.name); err != nil {
+			rows.Close()
+			return err
+		}
+		authors = append(authors, a)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	// The id that survives for each cleaned name (smallest id wins — authors are id-ordered,
+	// so the first seen is the smallest). Never clean to empty (keep the original instead).
+	survivor := map[string]int64{}
+	clean := make([]string, len(authors))
+	for i, a := range authors {
+		c := doujin.CleanArtist(a.name)
+		if c == "" {
+			c = a.name
+		}
+		clean[i] = c
+		if _, ok := survivor[c]; !ok {
+			survivor[c] = a.id
+		}
+	}
+
+	// Pass A: repoint manga off the losers, then delete them.
+	for i, a := range authors {
+		if s := survivor[clean[i]]; a.id != s {
+			if _, err := tx.Exec("UPDATE manga SET author_id=? WHERE author_id=?", s, a.id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("DELETE FROM authors WHERE id=?", a.id); err != nil {
+				return err
+			}
+		}
+	}
+	// Pass B: rename the survivors to their cleaned name (losers already gone, so no clash).
+	for i, a := range authors {
+		if survivor[clean[i]] == a.id && a.name != clean[i] {
+			if _, err := tx.Exec("UPDATE authors SET name=? WHERE id=?", clean[i], a.id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// migrate006DisplayTitle adds a user-editable display-title override. The canonical
+// `title` stays machine-derived from the folder name (and is refreshed by Rescan); when
+// display_title is non-NULL the UI shows it instead. This lets a user rename or translate
+// a title for display WITHOUT affecting nhentai matching (which re-parses the immutable
+// folder name, not the stored title — see matchInputs in nhentai.go) and without Rescan
+// clobbering the edit. NULL means "no override — show the canonical title".
+func migrate006DisplayTitle(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE manga ADD COLUMN display_title TEXT;`)
 	return err
 }
 

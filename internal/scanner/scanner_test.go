@@ -1,11 +1,39 @@
 package scanner
 
 import (
+	"archive/zip"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// buildCBZ writes a .cbz at path containing the named entries (image extensions
+// matter; contents do not for detection).
+func buildCBZ(t *testing.T, path string, names ...string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	for _, n := range names {
+		w, err := zw.Create(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // buildLibrary recreates the conftest.py fixture: Aoi/Blue Sky has 11 numeric
 // pages (tests natural sort 2<10), Mori/Forest has 3, plus a stray .txt and an
@@ -153,6 +181,96 @@ func TestScanRootDetectsBothLayouts(t *testing.T) {
 	}
 	if rt.FolderPath != filepath.Join(root, raw) {
 		t.Errorf("raw title folder_path = %q, want %q", rt.FolderPath, filepath.Join(root, raw))
+	}
+}
+
+func TestTitleNameFor(t *testing.T) {
+	cases := map[string]string{
+		filepath.Join("a", "b", "Blue Sky"):       "Blue Sky",   // folder: base name
+		filepath.Join("a", "b", "[Artist] T.cbz"): "[Artist] T", // archive: ext stripped
+		filepath.Join("a", "b", "Book.ZIP"):       "Book",       // case-insensitive
+	}
+	for in, want := range cases {
+		if got := TitleNameFor(in); got != want {
+			t.Errorf("TitleNameFor(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestPagesForArchive(t *testing.T) {
+	cbz := filepath.Join(t.TempDir(), "book.cbz")
+	buildCBZ(t, cbz, "2.png", "10.png", "1.png", "notes.txt")
+	pages := PagesFor(cbz)
+	if len(pages) != 3 {
+		t.Fatalf("PagesFor returned %d pages, want 3 (.txt excluded): %v", len(pages), pages)
+	}
+	// Natural order: 1 before 2 before 10, each a "<cbz>/<entry>" virtual path.
+	wantSuffix := []string{"/1.png", "/2.png", "/10.png"}
+	for i, suf := range wantSuffix {
+		if filepath.Base(pages[i]) != suf[1:] {
+			t.Errorf("page[%d] = %q, want entry %q", i, pages[i], suf[1:])
+		}
+		if pages[i] != cbz+suf {
+			t.Errorf("page[%d] = %q, want %q", i, pages[i], cbz+suf)
+		}
+	}
+}
+
+func TestScanRootDetectsArchives(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "lib")
+	mk := func(parts ...string) {
+		full := filepath.Join(append([]string{root}, parts...)...)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Organized folder title.
+	for i := 1; i <= 3; i++ {
+		mk("Aoi", "Blue Sky", fmt.Sprintf("%d.png", i))
+	}
+	// Archive inside an author folder (author has only a .cbz, no subdirs).
+	buildCBZ(t, filepath.Join(root, "Mori", "Forest.cbz"), "1.png", "2.png")
+	// Archive dropped straight in the root (no author folder).
+	buildCBZ(t, filepath.Join(root, "Raw Tank.cbz"), "01.png", "02.png", "03.png")
+
+	byTitle := map[string]DetectedFolder{}
+	for _, d := range ScanRoot(root) {
+		byTitle[d.Title] = d
+	}
+
+	if d, ok := byTitle["Blue Sky"]; !ok || d.Author != "Aoi" {
+		t.Errorf("folder title Blue Sky/Aoi not detected: %+v (%v)", d, ok)
+	}
+
+	forest, ok := byTitle["Forest"]
+	if !ok {
+		t.Fatal("archive title 'Forest' inside author folder not detected")
+	}
+	if forest.Author != "Mori" {
+		t.Errorf("archive author = %q, want Mori", forest.Author)
+	}
+	if forest.PageCount != 2 {
+		t.Errorf("archive page_count = %d, want 2", forest.PageCount)
+	}
+	if forest.FolderPath != filepath.Join(root, "Mori", "Forest.cbz") {
+		t.Errorf("archive folder_path = %q", forest.FolderPath)
+	}
+	if forest.CoverRelPath == nil || *forest.CoverRelPath != "1.png" {
+		t.Errorf("archive cover = %v, want 1.png", forest.CoverRelPath)
+	}
+
+	raw, ok := byTitle["Raw Tank"]
+	if !ok {
+		t.Fatal("raw root archive 'Raw Tank' not detected")
+	}
+	if raw.Author != "" {
+		t.Errorf("raw archive author = %q, want empty", raw.Author)
+	}
+	if raw.PageCount != 3 {
+		t.Errorf("raw archive page_count = %d, want 3", raw.PageCount)
 	}
 }
 

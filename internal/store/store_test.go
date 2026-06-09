@@ -87,6 +87,37 @@ func TestMigration003AddsNhentaiColumn(t *testing.T) {
 	}
 }
 
+func TestMigration006AddsDisplayTitleColumn(t *testing.T) {
+	db := openTest(t)
+	if err := Init(db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query("PRAGMA table_info(manga)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "display_title" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Error("manga.display_title column missing after Init")
+	}
+}
+
 func TestMigration004AddsTagTypeColumn(t *testing.T) {
 	db := openTest(t)
 	if err := Init(db); err != nil {
@@ -119,8 +150,70 @@ func TestMigration004AddsTagTypeColumn(t *testing.T) {
 }
 
 func TestMigrationLadderLength(t *testing.T) {
-	if MigrationCount() != 4 {
-		t.Errorf("MigrationCount() = %d, want 4", MigrationCount())
+	if MigrationCount() != 6 {
+		t.Errorf("MigrationCount() = %d, want 6", MigrationCount())
+	}
+}
+
+// migrate005 strips wrapping parens from author names and merges a clean-name collision:
+// "(Rustle)" + a separate "Rustle" become one "Rustle" owning both titles.
+func TestMigrate005CleansAndMergesAuthors(t *testing.T) {
+	db := openTest(t)
+	if _, err := db.Exec(schema); err != nil { // baseline tables, migration 005 not yet run
+		t.Fatal(err)
+	}
+	seed := func(name, mangaTitle, folder string) {
+		res, err := db.Exec("INSERT INTO authors(name) VALUES (?)", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aid, _ := res.LastInsertId()
+		if _, err := db.Exec(
+			"INSERT INTO manga(title, author_id, folder_path, page_count, date_added, date_modified) VALUES (?,?,?,?,?,?)",
+			mangaTitle, aid, folder, 1, "t", "t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("(Rustle)", "Diploma mill", "/lib/(Rustle)/Diploma mill")
+	seed("Rustle", "Another", "/lib/Rustle/Another") // already clean — collides on merge
+	seed("(Yoku)", "Datte", "/lib/(Yoku)/Datte")
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate005CleanAuthorNames(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	counts := map[string]int{}
+	rows, err := db.Query("SELECT a.name, COUNT(m.id) FROM authors a LEFT JOIN manga m ON m.author_id=a.id GROUP BY a.id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n string
+		var c int
+		if err := rows.Scan(&n, &c); err != nil {
+			t.Fatal(err)
+		}
+		counts[n] = c
+	}
+	if len(counts) != 2 {
+		t.Errorf("authors = %v, want exactly Rustle + Yoku", counts)
+	}
+	if counts["Rustle"] != 2 {
+		t.Errorf("Rustle owns %d titles, want 2 (merged)", counts["Rustle"])
+	}
+	if counts["Yoku"] != 1 {
+		t.Errorf("Yoku owns %d titles, want 1", counts["Yoku"])
+	}
+	if _, ok := counts["(Rustle)"]; ok {
+		t.Errorf("parenthesized author survived: %v", counts)
 	}
 }
 

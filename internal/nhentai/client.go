@@ -85,6 +85,7 @@ type GalleryDetail struct {
 		Japanese string `json:"japanese"`
 		Pretty   string `json:"pretty"`
 	} `json:"title"`
+	MediaID   string `json:"media_id"` // keys the cover CDN, like SearchResult.MediaID
 	NumPages  int    `json:"num_pages"`
 	Scanlator string `json:"scanlator"`
 	Tags      []Tag  `json:"tags"`

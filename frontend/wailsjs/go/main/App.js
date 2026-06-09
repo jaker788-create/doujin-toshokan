@@ -78,6 +78,10 @@ export function Search(arg1) {
   return window['go']['main']['App']['Search'](arg1);
 }
 
+export function SetDisplayTitle(arg1, arg2) {
+  return window['go']['main']['App']['SetDisplayTitle'](arg1, arg2);
+}
+
 export function SetNhentaiKey(arg1) {
   return window['go']['main']['App']['SetNhentaiKey'](arg1);
 }
@@ -112,6 +116,10 @@ export function SuggestAuthors(arg1) {
 
 export function SuggestTags(arg1) {
   return window['go']['main']['App']['SuggestTags'](arg1);
+}
+
+export function SuggestTagsTyped(arg1) {
+  return window['go']['main']['App']['SuggestTagsTyped'](arg1);
 }
 
 export function UpdateTags(arg1, arg2) {

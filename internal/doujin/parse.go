@@ -12,19 +12,22 @@ package doujin
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
 // Parsed is the decomposed form of a folder name. Title is already cleaned for
 // display; use TitleVariants for matching and Tags for the implied tags.
 type Parsed struct {
-	Event      string   // leading (…) convention, e.g. "C97" — informational, not a tag
-	Circle     string   // first […] group, e.g. "Eight PM" or "Circle (Artist)"
-	Title      string   // cleaned title (separators normalized to " / ")
-	Parodies   []string // (…) groups after the title, e.g. "naruto"
-	Language   string   // from a […] language tag, e.g. "english"
-	MiscTags   []string // known […] tags, e.g. "digital", "decensored"
-	Translator string   // {…} credit — discarded from tags
+	Event        string   // leading (…) convention, e.g. "C97" — informational, not a tag
+	Circle       string   // first […] group, e.g. "Eight PM" or "Circle (Artist)"
+	ExtraArtists []string // additional leading […] groups after the circle (collab works)
+	Title        string   // cleaned title (separators normalized to " / ")
+	Parodies     []string // (…) groups after the title, e.g. "naruto"
+	Language     string   // from a […] language tag, e.g. "english"
+	MiscTags     []string // known […] tags, e.g. "digital", "decensored"
+	Translator   string   // {…} credit — discarded from tags
+	GalleryID    int64    // nhentai gallery id from a leading "nhentai-<id>" prefix; 0 if none
 }
 
 // languages recognized in a […] group and treated as the Language tag.
@@ -115,10 +118,52 @@ func tokenize(s string) []segment {
 	return segs
 }
 
+// sourcePrefix peels a leading source/id decoration that rippers prepend to the
+// conventional name, e.g. "nhentai-271687 - [Circle] Title …". It returns the parsed
+// gallery id and the remaining name; (0, name unchanged) when the pattern is absent.
+//
+// Stripping matters two ways: the id is noise in the displayed title, and — worse —
+// left in place it is text before the first […], which makes ParseName treat the
+// first bracket as NOT the circle and mis-read the id as the title. The id itself is
+// worth keeping, though: it points at the exact nhentai gallery, a far stronger
+// auto-tag signal than a fuzzy artist/title search (see nhentai.go). Only a leading
+// "nhentai-<digits>" token (case-insensitive, '-' or '_' joining the word, id, and
+// the name) is matched; an id appearing mid-name is left untouched.
+func sourcePrefix(name string) (int64, string) {
+	const word = "nhentai"
+	s := strings.TrimSpace(name)
+	if len(s) <= len(word) || !strings.EqualFold(s[:len(word)], word) {
+		return 0, name
+	}
+	i := len(word)
+	if s[i] != '-' && s[i] != '_' {
+		return 0, name
+	}
+	i++
+	digitsStart := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == digitsStart {
+		return 0, name // "nhentai-" not followed by an id: not this pattern
+	}
+	id, err := strconv.ParseInt(s[digitsStart:i], 10, 64)
+	if err != nil {
+		return 0, name // unparseable/overflowing id — leave the name intact
+	}
+	// Drop the separator run (spaces / dashes / underscores) joining id to the name.
+	for i < len(s) && (s[i] == ' ' || s[i] == '-' || s[i] == '_') {
+		i++
+	}
+	return id, s[i:]
+}
+
 // ParseName decomposes a folder name into its parts.
 func ParseName(name string) Parsed {
-	segs := tokenize(name)
+	id, rest := sourcePrefix(name)
+	segs := tokenize(rest)
 	var p Parsed
+	p.GalleryID = id
 
 	firstSquare := -1
 	for i, s := range segs {
@@ -142,6 +187,24 @@ func ParseName(name string) Parsed {
 		if !textBefore {
 			p.Circle = segs[firstSquare].text
 			start = firstSquare + 1
+		}
+	}
+
+	// After the circle, any further consecutive leading […] groups (before the title
+	// text) are additional artists/circles of a collaborative work, e.g.
+	// "[A] [B] Title". A recognized language/misc-tag bracket is not an artist, so the
+	// loop stops there and leaves it to normal handling. The single-circle case skips
+	// this loop entirely (no regression).
+	if p.Circle != "" {
+		for start < len(segs) && segs[start].kind == segSquare {
+			t := strings.TrimSpace(segs[start].text)
+			if low := strings.ToLower(t); languages[low] || miscTags[low] {
+				break
+			}
+			if t != "" {
+				p.ExtraArtists = append(p.ExtraArtists, t)
+			}
+			start++
 		}
 	}
 
@@ -203,10 +266,15 @@ func DetectLanguage(s string) string {
 	return ""
 }
 
-// normalizeSeparators turns the various dual-language separators (" _ ", "|") into
-// " / " and collapses whitespace, so a "romaji _ english" title reads cleanly.
+// normalizeSeparators turns the various dual-language separators (" _ ", "|", " - ")
+// into " / " and collapses whitespace, so a "romaji <sep> english" title reads cleanly
+// and TitleVariants can split it into matchable halves. The " - " form is what a
+// pipe-separated title becomes once Windows strips the forbidden "|" from a filename;
+// it is matched only with surrounding spaces so intra-word hyphens (Juma-kun,
+// Kisho-Muri, bt-T) and hyphenated names are left intact.
 func normalizeSeparators(s string) string {
 	s = strings.ReplaceAll(s, " _ ", " / ")
+	s = strings.ReplaceAll(s, " - ", " / ")
 	s = strings.ReplaceAll(s, "|", "/")
 	return strings.Join(strings.Fields(s), " ")
 }
@@ -261,6 +329,20 @@ func (p Parsed) Anchors() []string {
 	return out
 }
 
+// artistFromGroup returns the artist name implied by a single "[…]" group's text:
+// the inner artist of a "Circle (Artist)" form (the person, usually the better
+// library author), else the whole group trimmed.
+func artistFromGroup(group string) string {
+	if op := strings.IndexByte(group, '('); op >= 0 {
+		if cp := strings.IndexByte(group, ')'); cp > op {
+			if inner := strings.TrimSpace(group[op+1 : cp]); inner != "" {
+				return inner
+			}
+		}
+	}
+	return strings.TrimSpace(group)
+}
+
 // Author returns the best single author name from the circle group: the inner
 // artist of a "Group (Artist)" form (the person, usually the better library author),
 // else the whole circle. Empty when there is no circle group at all.
@@ -268,14 +350,77 @@ func (p Parsed) Author() string {
 	if p.Circle == "" {
 		return ""
 	}
-	if op := strings.IndexByte(p.Circle, '('); op >= 0 {
-		if cp := strings.IndexByte(p.Circle, ')'); cp > op {
-			if inner := strings.TrimSpace(p.Circle[op+1 : cp]); inner != "" {
-				return inner
-			}
+	return artistFromGroup(p.Circle)
+}
+
+// ExtraArtistNames returns the additional collaborating artists of a multi-circle
+// folder name like "[A] [B] Title" (each extra group reduced to its artist the same
+// way Author() reduces the circle, so "[Circle (B)]" yields "B"). The primary author
+// (Author()) is excluded and the list is de-duplicated case-insensitively. Empty for
+// the common single-circle name. Names are not comma-split inside one group, so a
+// "[Circle (A, B)]" form is left to Author() as today (out of scope here).
+func (p Parsed) ExtraArtistNames() []string {
+	if len(p.ExtraArtists) == 0 {
+		return nil
+	}
+	primary := strings.ToLower(strings.TrimSpace(p.Author()))
+	var out []string
+	seen := map[string]bool{}
+	for _, group := range p.ExtraArtists {
+		name := artistFromGroup(group)
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || key == primary || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// CleanArtist strips a single fully-wrapping balanced () or [] pair from an artist /
+// author name and trims surrounding space, so a library folder named "(Rustle)" or
+// "[Yoku]" yields the bare nhentai artist tag "Rustle"/"Yoku" used for searching and
+// matching. It strips only when the whole string is one balanced group (so a hybrid
+// name like "A6 (Kisho Muri)", where the parens don't enclose the whole string, is
+// left intact), peels just one layer ("((x))" -> "(x)"), leaves an unbalanced or
+// unwrapped name untouched, and never cleans down to empty ("()" stays "()").
+func CleanArtist(s string) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) < 2 {
+		return s
+	}
+	var closer rune
+	switch r[0] {
+	case '(':
+		closer = ')'
+	case '[':
+		closer = ']'
+	default:
+		return s
+	}
+	depth := 0
+	for i, c := range r {
+		switch c {
+		case r[0]:
+			depth++
+		case closer:
+			depth--
+		}
+		// A wrap must close exactly at the final rune; an earlier return to depth 0
+		// means the group doesn't enclose the whole string (e.g. "(a) (b)").
+		if depth == 0 && i != len(r)-1 {
+			return s
 		}
 	}
-	return strings.TrimSpace(p.Circle)
+	if depth != 0 {
+		return s // unbalanced
+	}
+	if inner := strings.TrimSpace(string(r[1 : len(r)-1])); inner != "" {
+		return inner
+	}
+	return s
 }
 
 // Tags returns the lowercased tags implied by the name: language, misc tags, and

@@ -18,6 +18,10 @@ func langByID(m map[int64]string) func(nhentai.SearchResult) string {
 	return func(r nhentai.SearchResult) string { return m[r.ID] }
 }
 
+// noArtist / artistAll are artistMatch resolvers reporting the obvious for any candidate.
+func noArtist(nhentai.SearchResult) bool  { return false }
+func artistAll(nhentai.SearchResult) bool { return true }
+
 func applyIDs(cs []Candidate) []int64 {
 	ids := make([]int64, len(cs))
 	for i, c := range cs {
@@ -75,7 +79,7 @@ func TestSimilarityLopsidedLengthsUseTokenOverlap(t *testing.T) {
 
 func TestScoreTakesMaxOverTitlesAndPageBonus(t *testing.T) {
 	// Local is romaji; only the english online title matches. Page count is exact.
-	c := Score([]string{"Karakishi Youhei-dan"}, 50, "", "", sr(1, "Karakishi Youhei-dan", "からきし傭兵団", 50, 5))
+	c := Score([]string{"Karakishi Youhei-dan"}, 50, "", "", false, sr(1, "Karakishi Youhei-dan", "からきし傭兵団", 50, 5))
 	if c.TitleScore < 0.99 {
 		t.Errorf("title score = %v, want ~1 from english match", c.TitleScore)
 	}
@@ -87,7 +91,7 @@ func TestScoreTakesMaxOverTitlesAndPageBonus(t *testing.T) {
 	}
 
 	// No page count known -> no bonus, not exact/close, delta unknown.
-	c2 := Score([]string{"Karakishi Youhei-dan"}, 0, "", "", sr(1, "Karakishi Youhei-dan", "", 50, 5))
+	c2 := Score([]string{"Karakishi Youhei-dan"}, 0, "", "", false, sr(1, "Karakishi Youhei-dan", "", 50, 5))
 	if c2.PagesExact || c2.PagesClose || c2.PageDelta != -1 || c2.Score != c2.TitleScore {
 		t.Errorf("zero local pages should give no page signal: %+v", c2)
 	}
@@ -95,7 +99,7 @@ func TestScoreTakesMaxOverTitlesAndPageBonus(t *testing.T) {
 
 func TestScorePageToleranceAndBonusScaling(t *testing.T) {
 	mk := func(localPages, candPages int) Candidate {
-		return Score([]string{"x"}, localPages, "", "", sr(1, "x", "", candPages, 0))
+		return Score([]string{"x"}, localPages, "", "", false, sr(1, "x", "", candPages, 0))
 	}
 	if c := mk(242, 244); !c.PagesClose || c.PagesExact || c.PageDelta != 2 {
 		t.Errorf("±2 should be close (not exact): %+v", c)
@@ -110,11 +114,11 @@ func TestScorePageToleranceAndBonusScaling(t *testing.T) {
 }
 
 func TestScoreLanguageBoostAndFlags(t *testing.T) {
-	match := Score([]string{"x"}, 10, "english", "english", sr(1, "x", "", 10, 0))
+	match := Score([]string{"x"}, 10, "english", "english", false, sr(1, "x", "", 10, 0))
 	if !match.LangMatch || match.LangMismatch {
 		t.Errorf("expected LangMatch only: %+v", match)
 	}
-	mismatch := Score([]string{"x"}, 10, "english", "japanese", sr(1, "x", "", 10, 0))
+	mismatch := Score([]string{"x"}, 10, "english", "japanese", false, sr(1, "x", "", 10, 0))
 	if mismatch.LangMatch || !mismatch.LangMismatch {
 		t.Errorf("expected LangMismatch only: %+v", mismatch)
 	}
@@ -122,11 +126,11 @@ func TestScoreLanguageBoostAndFlags(t *testing.T) {
 		t.Errorf("same-language boost: match %v should beat mismatch %v", match.Score, mismatch.Score)
 	}
 	// "translated" is english-family.
-	if c := Score([]string{"x"}, 10, "translated", "english", sr(1, "x", "", 10, 0)); !c.LangMatch {
+	if c := Score([]string{"x"}, 10, "translated", "english", false, sr(1, "x", "", 10, 0)); !c.LangMatch {
 		t.Errorf("translated should match english-family: %+v", c)
 	}
 	// Unknown language on either side -> no flags, no boost.
-	if c := Score([]string{"x"}, 10, "", "english", sr(1, "x", "", 10, 0)); c.LangMatch || c.LangMismatch {
+	if c := Score([]string{"x"}, 10, "", "english", false, sr(1, "x", "", 10, 0)); c.LangMatch || c.LangMismatch {
 		t.Errorf("unknown local language -> no flags: %+v", c)
 	}
 }
@@ -139,8 +143,8 @@ func TestScoreDualLanguageVariantBeatsWholeTitle(t *testing.T) {
 	englishHalf := "Teaching the Super Cheeky Juma-kun One Hell of a Lesson"
 	online := sr(1, "Teaching the Super Cheeky Juma-kun One Hell of a Lesson", "", 0, 0)
 
-	whole_only := Score([]string{whole}, 0, "", "", online)
-	with_variants := Score([]string{whole, englishHalf}, 0, "", "", online)
+	whole_only := Score([]string{whole}, 0, "", "", false, online)
+	with_variants := Score([]string{whole, englishHalf}, 0, "", "", false, online)
 	if with_variants.TitleScore <= whole_only.TitleScore {
 		t.Errorf("variant score %v should beat whole-title score %v",
 			with_variants.TitleScore, whole_only.TitleScore)
@@ -156,7 +160,7 @@ func TestScoreSplitsCandidateDualLanguageTitle(t *testing.T) {
 	// strongly enough to qualify — the romaji half + decorations must not dilute it.
 	local := "A Dreadful Diet Method that Surprisingly Feels Good"
 	cand := sr(1, "Okosama ni mo Osusume Odoroku Hodo Kimochi Ii Kyoui no Diet Jutsu | Also Recommended for Kids: A Dreadful Diet Method that Surprisingly Feels Good (COMIC LO 2019-10) [English] [SakuraCircle] [Digital]", "", 19, 4)
-	c := Score([]string{local}, 19, "", "", cand)
+	c := Score([]string{local}, 19, "", "", false, cand)
 	if c.TitleScore < qualifyTitle {
 		t.Errorf("title score = %v, want >= %v (candidate english half should match)", c.TitleScore, qualifyTitle)
 	}
@@ -169,7 +173,7 @@ func TestDecideAutoRomajiLocalEnglishOnline(t *testing.T) {
 	cands := ScoreAll([]string{"Karakishi Youhei-dan Compilation"}, 50, "", []nhentai.SearchResult{
 		sr(10, "Karakishi Youhei-dan Compilation", "からきし傭兵団総集編", 50, 12),
 		sr(11, "Some Other Doujin", "別の作品", 30, 3),
-	}, noLang)
+	}, noLang, noArtist)
 	d := Decide(cands)
 	if d.Action != ActionAuto {
 		t.Fatalf("action = %q, want auto", d.Action)
@@ -186,7 +190,7 @@ func TestDecideAutoJapaneseLocalJapaneseOnline(t *testing.T) {
 	cands := ScoreAll([]string{"からきし傭兵団"}, 20, "", []nhentai.SearchResult{
 		sr(10, "Mercenary Group", "からきし傭兵団", 20, 8),
 		sr(11, "Unrelated", "全然違う", 21, 1),
-	}, noLang)
+	}, noLang, noArtist)
 	if d := Decide(cands); d.Action != ActionAuto {
 		t.Errorf("action = %q, want auto (japanese-vs-japanese match)", d.Action)
 	}
@@ -199,7 +203,7 @@ func TestDecideMergesDuplicateExactPageVariants(t *testing.T) {
 	cands := ScoreAll([]string{"alpha beta gamma"}, 10, "", []nhentai.SearchResult{
 		sr(10, "alpha beta gamma", "", 10, 5),
 		sr(11, "alpha beta gamma", "", 11, 9), // +1 page, still within tolerance
-	}, noLang)
+	}, noLang, artistAll)
 	d := Decide(cands)
 	if d.Action != ActionAuto {
 		t.Fatalf("action = %q, want auto (merge variants)", d.Action)
@@ -215,7 +219,7 @@ func TestDecideMergeWindowExcludesWeakerTitle(t *testing.T) {
 	cands := ScoreAll([]string{"one two three four five six"}, 10, "", []nhentai.SearchResult{
 		sr(10, "one two three four five six", "", 10, 5), // title ~1.0
 		sr(11, "one two three four nine ten", "", 10, 9), // qualifies (~0.7) but weaker
-	}, noLang)
+	}, noLang, noArtist)
 	d := Decide(cands)
 	if d.Action != ActionAuto {
 		t.Fatalf("action = %q, want auto", d.Action)
@@ -234,7 +238,7 @@ func TestDecideSameLanguageBecomesPrimary(t *testing.T) {
 		sr(11, "same title", "", 20, 99), // japanese, more favorites
 	}
 	cands := ScoreAll([]string{"same title"}, 20, "english", results,
-		langByID(map[int64]string{10: "english", 11: "japanese"}))
+		langByID(map[int64]string{10: "english", 11: "japanese"}), noArtist)
 	d := Decide(cands)
 	if d.Action != ActionAuto {
 		t.Fatalf("action = %q, want auto", d.Action)
@@ -253,7 +257,7 @@ func TestDecideLanguageMismatchStillAutoApplies(t *testing.T) {
 	// mismatch flag for display.
 	cands := ScoreAll([]string{"lonely title"}, 30, "english", []nhentai.SearchResult{
 		sr(10, "lonely title", "", 30, 5),
-	}, langByID(map[int64]string{10: "japanese"}))
+	}, langByID(map[int64]string{10: "japanese"}), noArtist)
 	d := Decide(cands)
 	if d.Action != ActionAuto {
 		t.Fatalf("action = %q, want auto despite language mismatch", d.Action)
@@ -267,19 +271,96 @@ func TestDecideReviewWhenTitleTooWeak(t *testing.T) {
 	// Page count within tolerance but the title is unrelated -> not close enough.
 	cands := ScoreAll([]string{"alpha beta"}, 10, "", []nhentai.SearchResult{
 		sr(10, "totally unrelated title", "", 10, 5),
-	}, noLang)
+	}, noLang, noArtist)
 	if d := Decide(cands); d.Action != ActionReview {
 		t.Errorf("action = %q, want review (weak title)", d.Action)
 	}
 }
 
-func TestDecideReviewWhenPagesFarOff(t *testing.T) {
-	// Perfect title but the page count is well outside tolerance -> review.
+func TestDecideStrongTitleAutoDespiteFarPages(t *testing.T) {
+	// A near-perfect, multi-token title carries auto-apply even when pages are well
+	// outside tolerance (covers/decensored/scan differences) and no artist could resolve.
 	cands := ScoreAll([]string{"exact title match"}, 10, "", []nhentai.SearchResult{
 		sr(10, "exact title match", "", 25, 5),
-	}, noLang)
-	if d := Decide(cands); d.Action != ActionReview || len(d.Apply) != 0 {
-		t.Errorf("action = %q apply = %v, want review/none (pages far off)", d.Action, applyIDs(d.Apply))
+	}, noLang, noArtist)
+	if d := Decide(cands); d.Action != ActionAuto {
+		t.Errorf("action = %q, want auto (strong title alone)", d.Action)
+	}
+	// A weak title with far pages and no artist is still review.
+	weak := ScoreAll([]string{"alpha beta"}, 10, "", []nhentai.SearchResult{
+		sr(10, "totally different", "", 25, 5),
+	}, noLang, noArtist)
+	if d := Decide(weak); d.Action != ActionReview {
+		t.Errorf("action = %q, want review (weak title, far pages)", d.Action)
+	}
+}
+
+func TestDecideArtistMatchAutoDespitePageDelta(t *testing.T) {
+	// The right artist + a full title auto-applies even with the page count off by 5 —
+	// pages no longer gate a confirmed-artist match (the Diploma mill case).
+	cands := ScoreAll([]string{"Diploma Mill"}, 24, "", []nhentai.SearchResult{
+		sr(10, "Diploma mill", "", 29, 2249),
+	}, noLang, artistAll)
+	if d := Decide(cands); d.Action != ActionAuto {
+		t.Errorf("action = %q, want auto (artist + strong title, far pages)", d.Action)
+	}
+}
+
+func TestDecideArtistExactPageLowTitle(t *testing.T) {
+	// A romaji-prefixed candidate scores low on title (the romaji half + a "-" the parser
+	// doesn't split dilute it) but the artist matches and the pages are exact — auto via
+	// the artist+exact-pages route (the Agata case). Without the artist it stays review,
+	// which also proves the title really is below the qualify bar.
+	local := "My mean elder sister at the end of summer"
+	cand := sr(10, "Natsu no Owari ni Ijiwaru Nee-chan - My mean elder sister at the end of summer.", "", 20, 9254)
+	if d := Decide(ScoreAll([]string{local}, 20, "", []nhentai.SearchResult{cand}, noLang, artistAll)); d.Action != ActionAuto {
+		t.Errorf("action = %q, want auto (artist + exact pages)", d.Action)
+	}
+	if d := Decide(ScoreAll([]string{local}, 20, "", []nhentai.SearchResult{cand}, noLang, noArtist)); d.Action != ActionReview {
+		t.Errorf("action = %q, want review without artist confirmation", d.Action)
+	}
+}
+
+func TestDecideStrongTitleBarBoundary(t *testing.T) {
+	// A single-token perfect title with no artist and far pages must NOT auto: the
+	// strong-title-alone route needs >= strongTitleMinTokens to avoid one-word collisions.
+	cands := ScoreAll([]string{"Gift"}, 10, "", []nhentai.SearchResult{
+		sr(10, "Gift", "", 40, 5),
+	}, noLang, noArtist)
+	if d := Decide(cands); d.Action != ActionReview {
+		t.Errorf("action = %q, want review (single-token title, no corroboration)", d.Action)
+	}
+}
+
+func TestDecideDoesNotMergeDifferentPartVariants(t *testing.T) {
+	// Same artist, identical title, but very different page counts (a short/full or
+	// part-1/part-2 pair). Both qualify now that pages don't gate, but only the
+	// page-matching primary is applied — the differently-sized one must not merge.
+	cands := ScoreAll([]string{"alpha beta gamma"}, 10, "", []nhentai.SearchResult{
+		sr(10, "alpha beta gamma", "", 10, 100), // exact pages -> primary
+		sr(11, "alpha beta gamma", "", 40, 50),  // identical title, far pages
+	}, noLang, artistAll)
+	d := Decide(cands)
+	if d.Action != ActionAuto {
+		t.Fatalf("action = %q, want auto", d.Action)
+	}
+	if got := applyIDs(d.Apply); len(got) != 1 || got[0] != 10 {
+		t.Errorf("apply = %v, want only the page-matching primary [10]", got)
+	}
+}
+
+func TestScoreCarriesArtistMatchAndTokens(t *testing.T) {
+	c := Score([]string{"alpha beta"}, 10, "", "", true, sr(1, "alpha beta", "", 10, 0))
+	if !c.ArtistMatch {
+		t.Errorf("ArtistMatch not carried: %+v", c)
+	}
+	if c.MatchTokens != 2 {
+		t.Errorf("MatchTokens = %d, want 2", c.MatchTokens)
+	}
+	// A nil artist resolver yields false for every candidate.
+	cs := ScoreAll([]string{"x"}, 10, "", []nhentai.SearchResult{sr(1, "x", "", 10, 0)}, noLang, nil)
+	if cs[0].ArtistMatch {
+		t.Errorf("nil artist resolver should yield false")
 	}
 }
 
@@ -287,7 +368,7 @@ func TestDecideReviewOnEmptyAndGarbage(t *testing.T) {
 	if d := Decide(nil); d.Action != ActionReview || len(d.Ranked) != 0 {
 		t.Errorf("empty: action=%q ranked=%d, want review/0", d.Action, len(d.Ranked))
 	}
-	cands := ScoreAll([]string{}, 0, "", []nhentai.SearchResult{sr(10, "anything", "", 5, 1)}, noLang)
+	cands := ScoreAll([]string{}, 0, "", []nhentai.SearchResult{sr(10, "anything", "", 5, 1)}, noLang, noArtist)
 	if d := Decide(cands); d.Action != ActionReview {
 		t.Errorf("garbage local title: action=%q, want review", d.Action)
 	}

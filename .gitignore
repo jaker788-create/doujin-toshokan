@@ -10,9 +10,15 @@ dist/
 
 # Go / Wails: commit build/ config (icons, manifests, nsis) but NOT the compiled output
 build/bin/
+# NSIS bootstrapper's build-time WebView2 download — a binary artifact, not config.
+build/windows/installer/tmp/
 node_modules/
 frontend/dist/
 frontend/package.json.md5
+
+# Local reference only: the nhentai OpenAPI spec used while building internal/nhentai.
+# Not wired into the build or code; kept on disk, out of this app-only public repo.
+openapi.json
 
 # Runtime data (kept outside the repo anyway; here as a safety net)
 .doujin/

@@ -274,6 +274,36 @@ func TestSetMangaTagsPreservesSubjectOnFreeformEdit(t *testing.T) {
 	}
 }
 
+func TestSetMangaTagsArtistSubject(t *testing.T) {
+	db := newDB(t)
+	mid, err := IngestManga(db, MangaInput{Title: "A", Author: "Aoi", FolderPath: "/p1", PageCount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The editor adds a collaborating artist (artist subject) alongside a plain tag.
+	saved, err := SetMangaTags(db, mid, []tag.Typed{
+		{Name: "artistb", Type: tag.Artist},
+		{Name: "foo", Type: tag.General},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, tt := range saved {
+		got[tt.Name] = tt.Type
+	}
+	if got["artistb"] != tag.Artist || got["foo"] != tag.General {
+		t.Errorf("subjects wrong: %v", got)
+	}
+	// Re-saving the artist tag as a plain name must NOT downgrade its subject.
+	if _, err := SetMangaTags(db, mid, gen("artistb")); err != nil {
+		t.Fatal(err)
+	}
+	if got := tagType(t, db, "artistb"); got != tag.Artist {
+		t.Errorf("artistb type = %q, want artist preserved (no downgrade)", got)
+	}
+}
+
 func TestDuplicateFolderPathRejected(t *testing.T) {
 	db := newDB(t)
 	if _, err := IngestManga(db, MangaInput{Title: "A", Author: "Aoi", FolderPath: "/dup", PageCount: 1}); err != nil {

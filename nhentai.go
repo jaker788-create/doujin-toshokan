@@ -10,7 +10,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -20,6 +19,7 @@ import (
 	"doujin/internal/doujin"
 	"doujin/internal/ingest"
 	"doujin/internal/nhentai"
+	"doujin/internal/scanner"
 	"doujin/internal/search"
 	"doujin/internal/tag"
 )
@@ -34,6 +34,11 @@ const previewCount = 3
 
 // shortlistMax caps how many ranked candidates are returned to the UI.
 const shortlistMax = 8
+
+// reviewMax caps how many candidates a manual-review item shows. The review shortlist is
+// the local artist's own catalog ranked by closeness, so a prolific artist is trimmed to
+// the closest few rather than dumping the whole catalog on the user.
+const reviewMax = 10
 
 // maxSearchQueries caps how many nhentai searches one title may trigger. Doujin
 // folder names are too decorated to match as a whole, so we search by circle/artist
@@ -51,31 +56,39 @@ const strongTitleScore = 0.6
 // candidates). The folder *basename* is parsed — not the cleaned stored title — so
 // these survive title cleaning, exactly as Rescan re-derives them.
 type matchInput struct {
-	variants []string
-	anchors  []string
-	lang     string          // local language ("" when the folder name implies none)
-	artist   string          // lowercased local artist/author, for overlap flags
-	parodies map[string]bool // lowercased local parody set, for overlap flags
+	variants  []string
+	anchors   []string
+	lang      string          // local language ("" when the folder name implies none)
+	artist    string          // lowercased local artist/author, for overlap flags
+	parodies  map[string]bool // lowercased local parody set, for overlap flags
+	galleryID int64           // exact nhentai gallery id from the name (0 if none) — a direct-lookup shortcut
 }
 
 // matchInputs parses the folder basename into a matchInput. The stored author (from
 // the author folder) wins as the local artist when present; otherwise the artist is
 // taken from the [Circle (Artist)] in the name.
 func matchInputs(folderPath, fallbackTitle, authorName string) matchInput {
-	p := doujin.ParseName(filepath.Base(folderPath))
+	// TitleNameFor strips a .cbz/.zip extension for an archive title so its name parses
+	// the same as a folder's; ParseName also peels a "nhentai-<id>" prefix and exposes
+	// the gallery id, which becomes a direct-lookup shortcut below.
+	p := doujin.ParseName(scanner.TitleNameFor(folderPath))
 	mi := matchInput{
-		variants: p.TitleVariants(),
-		anchors:  p.Anchors(),
-		lang:     p.Language,
-		parodies: map[string]bool{},
+		variants:  p.TitleVariants(),
+		anchors:   p.Anchors(),
+		lang:      p.Language,
+		parodies:  map[string]bool{},
+		galleryID: p.GalleryID,
 	}
 	if len(mi.variants) == 0 {
 		mi.variants = []string{fallbackTitle}
 	}
-	if a := strings.TrimSpace(authorName); a != "" {
+	// Clean a wrapping "(Artist)"/"[Artist]" folder name down to the bare nhentai artist
+	// tag, so the catalog query and the artist-match compare both use "Rustle", not
+	// "(Rustle)" (which matches no tag and never equals a parsed candidate artist).
+	if a := doujin.CleanArtist(strings.TrimSpace(authorName)); a != "" {
 		mi.anchors = append(mi.anchors, a)
 		mi.artist = strings.ToLower(a)
-	} else if a := p.Author(); a != "" {
+	} else if a := doujin.CleanArtist(p.Author()); a != "" {
 		mi.artist = strings.ToLower(a)
 	}
 	for _, par := range p.Parodies {
@@ -133,6 +146,7 @@ type autoTagRun struct {
 	artistCount map[string]int
 	searchCache map[string]*cachedSearch
 	detailCache map[int64]*nhentai.GalleryDetail
+	trace       []string // per-title query diagnostic (query→count); reset each gatherCandidates
 }
 
 // newAutoTagRun builds a run with empty caches and a normalized language mode.
@@ -189,6 +203,25 @@ func withLang(query, lang string) string {
 // artistCatalogQuery is the artist-tag catalog search, optionally language-narrowed.
 func artistCatalogQuery(artist, lang string) string {
 	return withLang(`artist:"`+artist+`"`, lang)
+}
+
+// artistTagVariants returns alternate spellings of an artist name to try when the exact
+// tag yields nothing, since a folder name and nhentai's tag can differ in punctuation:
+// nhentai spells some symbols as words ("50% OFF" -> "50 percent off") and otherwise
+// collapses punctuation to spaces. The exact form is omitted (already tried), and an
+// empty/identical variant is skipped, so a clean name like "ayana rio" yields none.
+func artistTagVariants(artist string) []string {
+	var out []string
+	seen := map[string]bool{artist: true}
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	add(autotag.Normalize(strings.ReplaceAll(artist, "%", " percent ")))
+	add(autotag.Normalize(artist))
+	return out
 }
 
 // catalog fetches an artist-catalog query, paging through every result page (capped at
@@ -263,46 +296,63 @@ type searchRequest struct {
 	page  int
 }
 
-// searchRequests orders the nhentai searches to try. Free-text title goes first — for
-// most titles nhentai matches it directly, and the caller verifies the artist on the
-// results. But nhentai's free-text only indexes a gallery's primary (romaji/japanese)
-// title, so a local name taken from the english subtitle finds nothing; the reliable
-// fallback is the artist *tag*, narrowed by the first distinctive title word
-// (artist:"name" title:"word") so a prolific artist's catalog collapses to a handful,
-// then the bare catalog. Anchor free-text is the last resort (e.g. a circle with no
-// artist tag). When lang is set every query is language-narrowed. De-duplicated by
-// query+page; the caller bounds how many run.
+// searchRequests orders the nhentai searches to try. The primary title by free-text goes
+// first — for most titles nhentai matches it directly, and the caller verifies the artist
+// on the results. Then come the artist *tag* queries (narrowed by the first distinctive
+// title word, then the bare catalog): nhentai's free-text only indexes a gallery's primary
+// (romaji/japanese) title, so a local name taken from the english subtitle finds nothing,
+// and the artist tag is the reliable fallback. The artist queries deliberately precede the
+// *remaining* title variants so they stay within the per-title query budget even when a
+// title has several variants. Anchor free-text is the last resort (e.g. a circle with no
+// artist tag). When lang is set the *title/anchor* free-text queries are language-narrowed,
+// but the artist-tag queries are NOT — the tag is constraint enough, and a language filter
+// would only hide an artist whose works are in another language. De-duplicated; page 1.
 func searchRequests(artist string, variants, anchors []string, lang string) []searchRequest {
 	var reqs []searchRequest
 	seen := map[string]bool{}
-	add := func(q string, page int) {
+	add := func(q string, filtered bool) {
 		q = strings.TrimSpace(q)
-		if q == "" || page < 1 {
+		if q == "" {
 			return
 		}
-		q = withLang(q, lang)
-		k := fmt.Sprintf("%s#%d", strings.ToLower(q), page)
+		if filtered {
+			q = withLang(q, lang)
+		}
+		k := strings.ToLower(q)
 		if !seen[k] {
 			seen[k] = true
-			reqs = append(reqs, searchRequest{q, page})
+			reqs = append(reqs, searchRequest{q, 1})
 		}
 	}
-	for _, v := range variants {
-		add(v, 1)
+	if len(variants) > 0 {
+		add(variants[0], true)
 	}
 	if artist != "" {
 		aq := `artist:"` + artist + `"`
 		if len(variants) > 0 {
 			if w := firstTitleWord(variants[0]); w != "" {
-				add(aq+` title:"`+w+`"`, 1)
+				add(aq+` title:"`+w+`"`, false)
 			}
 		}
-		add(aq, 1)
+		add(aq, false)
+	}
+	for i := 1; i < len(variants); i++ {
+		add(variants[i], true)
 	}
 	for _, a := range anchors {
-		add(a, 1)
+		add(a, true)
 	}
 	return reqs
+}
+
+// isArtistQuery reports whether a search query is constrained to the local artist's tag
+// (artist:"<artist>"…), so its results are that artist's by construction — letting the
+// title-first ladder flag artist matches even for galleries whose title omits the artist.
+func isArtistQuery(query, artist string) bool {
+	if artist == "" {
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(query), `artist:"`+artist+`"`)
 }
 
 // firstTitleWord returns the first distinctive word of a title for a title:"<word>"
@@ -322,10 +372,13 @@ func firstTitleWord(s string) string {
 // once — cached, so every sibling reuses it with no further network — and matches against
 // that; only a catalog miss falls through to a title free-text fallback. For a single-title
 // or unknown artist it runs the cheaper title-first ladder (bounded by maxSearchQueries),
-// stopping early on a confident match. The bool reports a truncated artist catalog.
+// stopping early on a confident match. Either way, every result that came from an artist:"…"
+// query is recorded as the artist's (artistIDs) so it is recognized as a match even when its
+// title omits the artist. The bool reports a truncated artist catalog.
 func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInput, pages int, localLang string) ([]autotag.Candidate, bool, error) {
 	lang := catalogLanguage(run.langMode, localLang)
 	seen := map[int64]bool{}
+	artistIDs := map[int64]bool{} // ids from any artist:"…" query — artist-matched by construction
 	var acc []nhentai.SearchResult
 	add := func(rs []nhentai.SearchResult) {
 		for _, r := range rs {
@@ -335,18 +388,61 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 			}
 		}
 	}
-	score := func() []autotag.Candidate {
-		return autotag.ScoreAll(mi.variants, pages, localLang, acc, candLangResolver)
+	// A candidate is the local artist's when it came back from an artist:"…" query (nhentai
+	// asserts the tag) or when its own decorated title parses to the same artist (a work
+	// mis-tagged under a different circle that the title-free-text search happened to find).
+	artistMatch := func(r nhentai.SearchResult) bool {
+		return artistIDs[r.ID] || candidateArtistMatches(r, mi.artist)
 	}
+	score := func() []autotag.Candidate {
+		return autotag.ScoreAll(mi.variants, pages, localLang, acc, candLangResolver, artistMatch)
+	}
+	// Per-title diagnostic: each query and how many results it returned, so a "no artist
+	// matches" review can be traced to the exact query that came back empty.
+	run.trace = run.trace[:0]
+	note := func(q string, n int) { run.trace = append(run.trace, fmt.Sprintf("%s→%d", q, n)) }
 
 	truncated := false
 	catalogFirst := mi.artist != "" && run.artistCount[mi.artist] >= 2
 	if catalogFirst {
-		results, trunc, err := run.catalog(ctx, artistCatalogQuery(mi.artist, lang))
-		if err != nil {
-			return nil, false, err
+		// Catalog attempts, in order, stopping at the first non-empty. Language-narrowed
+		// first: an all-language catalog for a prolific artist can exceed the page cap and
+		// truncate away the match, so narrowing keeps it in range. Then all-languages, so a
+		// Japanese-only artist isn't missed under a forced-english run. Within each, the exact
+		// tag then punctuation variants ("50% OFF" -> "50 percent off"). Language only narrows
+		// the fetch; it still ranks, and the chosen catalog's works are all artist-matched.
+		forms := append([]string{mi.artist}, artistTagVariants(mi.artist)...)
+		var attempts []string
+		attemptSeen := map[string]bool{}
+		addAttempt := func(q string) {
+			if !attemptSeen[q] {
+				attemptSeen[q] = true
+				attempts = append(attempts, q)
+			}
 		}
-		truncated = trunc
+		if lang != "" {
+			for _, f := range forms {
+				addAttempt(artistCatalogQuery(f, lang))
+			}
+		}
+		for _, f := range forms {
+			addAttempt(artistCatalogQuery(f, ""))
+		}
+		var results []nhentai.SearchResult
+		for _, q := range attempts {
+			res, trunc, cerr := run.catalog(ctx, q)
+			if cerr != nil {
+				return nil, false, cerr
+			}
+			note(q, len(res))
+			if len(res) > 0 {
+				results, truncated = res, trunc
+				break
+			}
+		}
+		for _, r := range results {
+			artistIDs[r.ID] = true
+		}
 		add(results)
 		if confidentMatch(score(), mi.artist) {
 			return score(), truncated, nil
@@ -374,6 +470,12 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 		if err != nil {
 			return nil, false, err
 		}
+		note(rq.query, len(results))
+		if isArtistQuery(rq.query, mi.artist) {
+			for _, r := range results {
+				artistIDs[r.ID] = true
+			}
+		}
 		add(results)
 		if confidentMatch(score(), mi.artist) {
 			break
@@ -384,16 +486,18 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 
 // confidentMatch reports whether some scored candidate is safe enough to stop searching:
 // pages within tolerance and a full-enough title (autotag's auto-apply bar) AND — when
-// the local artist is known — the candidate's own artist matches. That artist guard is
-// what lets the title-only search run first without a same-titled work by a different
-// artist ending the search before the artist-narrowed query gets its turn.
+// the local artist is known — the candidate is by that artist (the ArtistMatch the scorer
+// already resolved). That artist guard is what lets the title-only search run first
+// without a same-titled work by a different artist ending the search before the
+// artist-narrowed query gets its turn. Note it keeps the page gate even though Decide no
+// longer requires it: a loose page match shouldn't end the search prematurely.
 func confidentMatch(cands []autotag.Candidate, localArtist string) bool {
 	for i := range cands {
 		c := cands[i]
 		if !c.PagesClose || c.TitleScore < strongTitleScore {
 			continue
 		}
-		if localArtist == "" || candidateArtistMatches(c.Gallery, localArtist) {
+		if localArtist == "" || c.ArtistMatch {
 			return true
 		}
 	}
@@ -533,6 +637,29 @@ func (a *App) MatchNhentai(id int64) (*MatchResult, error) {
 	// A single manual fetch: an empty artistCount keeps it on the title-first path (no
 	// full catalog page-through for one title), with Auto language narrowing.
 	run := newAutoTagRun(client, "auto", nil)
+
+	// Shortcut: an exact gallery id embedded in the folder name is authoritative —
+	// fetch that one gallery and present it as a confident match, skipping the fuzzy
+	// search entirely. A bad/stale id (fetch error, e.g. 404) falls through to search.
+	if mi.galleryID != 0 {
+		if d, derr := run.detail(a.ctx, mi.galleryID); derr == nil {
+			localTags, _ := search.GetMangaTagsTyped(a.db, id)
+			return &MatchResult{
+				MangaID:         id,
+				LocalTitle:      m.Title,
+				LocalAuthor:     m.AuthorName,
+				LocalPages:      m.PageCount,
+				LocalLanguage:   localLang,
+				LocalTags:       localTags,
+				FolderPath:      m.FolderPath,
+				CoverRelPath:    m.CoverRelPath,
+				Decision:        string(autotag.ActionAuto),
+				MergeGalleryIDs: []int64{d.ID},
+				Candidates:      []NhentaiCandidate{galleryIDCandidate(d, m.PageCount, mi)},
+			}, nil
+		}
+	}
+
 	scored, _, err := a.gatherCandidates(a.ctx, run, mi, m.PageCount, localLang)
 	if err != nil {
 		return nil, err
@@ -556,7 +683,13 @@ func (a *App) MatchNhentai(id int64) (*MatchResult, error) {
 		res.Decision = "none"
 		return res, nil
 	}
-	res.Candidates = shortlist(dec.Ranked, shortlistMax, mi)
+	// On review, show the artist's own works (closest first, capped); on auto, keep the
+	// full ranked list so the merge set stays visible for the one-click preview.
+	if dec.Action == autotag.ActionAuto {
+		res.Candidates = shortlist(dec.Ranked, shortlistMax, mi)
+	} else {
+		res.Candidates = shortlist(reviewPool(dec.Ranked), reviewMax, mi)
+	}
 
 	// Detail-fetch the candidates worth previewing: on auto, the merge set (so the UI
 	// previews the union it will apply); on review, the top few. Each fetch refines the
@@ -730,7 +863,56 @@ func toCandidate(c autotag.Candidate) NhentaiCandidate {
 		Language:      c.Lang,
 		LangMatch:     c.LangMatch,
 		LangMismatch:  c.LangMismatch,
+		ArtistMatch:   c.ArtistMatch,
 	}
+}
+
+// galleryIDCandidate builds the single UI candidate for a title whose folder name
+// carried an exact nhentai gallery id (e.g. "nhentai-271687 - …"). The fetched detail
+// is authoritative, so it is presented as a confident match with its tags already
+// populated and its cover wired (MediaID). Page badges are computed against the local
+// count; artist/parody overlap is marked from the detail's own typed tags.
+func galleryIDCandidate(d *nhentai.GalleryDetail, localPages int, mi matchInput) NhentaiCandidate {
+	c := NhentaiCandidate{
+		GalleryID:     d.ID,
+		MediaID:       d.MediaID,
+		GalleryURL:    fmt.Sprintf("https://nhentai.net/g/%d/", d.ID),
+		EnglishTitle:  d.Title.English,
+		JapaneseTitle: d.Title.Japanese,
+		NumPages:      d.NumPages,
+		Score:         1,
+		TitleScore:    1,
+		PageDelta:     -1,
+		Tags:          galleryTypedTags(d),
+	}
+	if localPages > 0 && d.NumPages > 0 {
+		delta := localPages - d.NumPages
+		if delta < 0 {
+			delta = -delta
+		}
+		c.PageDelta = delta
+		c.PagesExact = delta == 0
+	}
+	markOverlap(&c, mi.artist, mi.parodies, d)
+	return c
+}
+
+// reviewPool narrows the ranked candidates for a manual-review item to the local artist's
+// own works when any are present, so a same-titled work by a *different* artist (pulled in
+// by the title free-text fallback) doesn't clutter the picker. It falls back to the full
+// ranked list when no candidate is artist-matched (a hybrid author name whose catalog came
+// back empty), and preserves Decide's best-first order so a later cap keeps the closest.
+func reviewPool(ranked []autotag.Candidate) []autotag.Candidate {
+	var artistOnly []autotag.Candidate
+	for _, c := range ranked {
+		if c.ArtistMatch {
+			artistOnly = append(artistOnly, c)
+		}
+	}
+	if len(artistOnly) > 0 {
+		return artistOnly
+	}
+	return ranked
 }
 
 // shortlist turns the top n ranked candidates into UI candidates, flagging each whose
@@ -792,8 +974,11 @@ func markOverlap(c *NhentaiCandidate, localArtist string, localParodies map[stri
 
 // AutoTagOptions controls the bulk sweep. Resync re-tags titles already linked to a
 // gallery; otherwise linked titles are skipped (idempotent re-runs). LanguageMode narrows
-// every search by language: "auto" follows each title's local language (assuming all
-// languages when untagged), "english"/"japanese" force that language.
+// the title free-text searches by language ("auto" follows each title's local language,
+// assuming all languages when untagged; "english"/"japanese" force that language) and ranks
+// same-language matches higher. For an artist catalog the narrowed query is tried first
+// (keeping a prolific artist under the page cap) but falls back to all languages when it is
+// empty, so an artist's own works are never hidden — only fetched in a smaller batch first.
 type AutoTagOptions struct {
 	Resync       bool   `json:"resync"`
 	LanguageMode string `json:"language_mode"`
@@ -888,7 +1073,9 @@ func (a *App) autotagTargets(resync bool) ([]autotagTarget, error) {
 	if !resync {
 		q += " WHERE m.nhentai_gallery_id IS NULL"
 	}
-	q += " ORDER BY m.title"
+	// Group by artist so each artist's titles process consecutively (warming the catalog
+	// cache) and arrive in the review queue already grouped.
+	q += " ORDER BY a.name, m.title"
 	rows, err := a.db.Query(q)
 	if err != nil {
 		return nil, err
@@ -930,6 +1117,30 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 		if localLang == "" {
 			localLang = a.localLanguageTag(t.id)
 		}
+
+		// Shortcut: an exact gallery id in the folder name is authoritative — fetch that
+		// one gallery and auto-apply its tags, skipping the multi-query search (cheaper and
+		// exact). A cancellation aborts the run; any other fetch error (e.g. a stale id)
+		// falls through to the normal search below.
+		if mi.galleryID != 0 {
+			if d, derr := run.detail(ctx, mi.galleryID); derr == nil {
+				if _, aerr := a.applyTags(t.id, d.ID, []*nhentai.GalleryDetail{d}); aerr != nil {
+					prog.Outcome, prog.Detail = "error", aerr.Error()
+					a.emit(prog)
+					continue
+				}
+				done.Applied++
+				prog.Outcome = "applied"
+				prog.Detail = fmt.Sprintf("gallery #%d (from name): %s", d.ID, d.Title.English)
+				a.emit(prog)
+				continue
+			} else if ctx.Err() != nil {
+				done.Cancelled = true
+				a.emitDone(done)
+				return
+			}
+		}
+
 		scored, truncated, err := a.gatherCandidates(ctx, run, mi, t.pages, localLang)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -945,9 +1156,7 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 		dec := autotag.Decide(scored)
 		if len(dec.Ranked) == 0 {
 			prog.Outcome = "none"
-			if truncated {
-				prog.Detail = truncatedNote
-			}
+			prog.Detail = reviewDetail(run.trace, truncated)
 			a.emit(prog)
 			continue
 		}
@@ -1000,15 +1209,28 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 			FolderPath:    t.folderPath,
 			CoverRelPath:  t.coverRelPath,
 			Decision:      "review",
-			Candidates:    shortlist(dec.Ranked, shortlistMax, mi),
+			Candidates:    shortlist(reviewPool(dec.Ranked), reviewMax, mi),
 		})
 		prog.Outcome = "review"
-		if truncated {
-			prog.Detail = truncatedNote
-		}
+		prog.Detail = reviewDetail(run.trace, truncated)
 		a.emit(prog)
 	}
 	a.emitDone(done)
+}
+
+// reviewDetail builds the diagnostic detail for a review/none outcome: the per-title query
+// trace (each query→result-count) plus the truncation note when the catalog hit its cap. It
+// is what surfaces, in the sweep log, exactly which query came back empty for an artist that
+// "isn't matching".
+func reviewDetail(trace []string, truncated bool) string {
+	d := strings.Join(trace, "  ")
+	if truncated {
+		if d != "" {
+			d += "  "
+		}
+		d += "[" + truncatedNote + "]"
+	}
+	return d
 }
 
 func (a *App) emit(p AutoTagProgress) { wailsruntime.EventsEmit(a.ctx, "autotag:progress", p) }

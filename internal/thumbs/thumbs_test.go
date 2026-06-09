@@ -1,6 +1,7 @@
 package thumbs
 
 import (
+	"archive/zip"
 	"image"
 	"image/png"
 	"os"
@@ -9,6 +10,27 @@ import (
 
 	"github.com/disintegration/imaging"
 )
+
+// buildCBZWithPNG writes a .cbz at path holding one w×h PNG entry named entry.
+func buildCBZWithPNG(t *testing.T, path, entry string, w, h int) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	ew, err := zw.Create(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(ew, image.NewRGBA(image.Rect(0, 0, w, h))); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // writePNG writes a w×h PNG, matching the 60×90 fixture pages from conftest.py.
 func writePNG(t *testing.T, path string, w, h int) {
@@ -90,6 +112,43 @@ func TestNoUpscaleWhenSourceNarrower(t *testing.T) {
 	}
 	if w := widthOf(t, out); w != 60 {
 		t.Errorf("width = %d, want 60 (no upscaling)", w)
+	}
+}
+
+func TestThumbnailFromArchiveEntry(t *testing.T) {
+	cbz := filepath.Join(t.TempDir(), "book.cbz")
+	buildCBZWithPNG(t, cbz, "sub/page.png", 60, 90)
+	cache := filepath.Join(t.TempDir(), "thumbs")
+
+	out, err := GetThumbnailArchive(cbz, "sub/page.png", 30, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := widthOf(t, out); w != 30 {
+		t.Errorf("archive thumbnail width = %d, want 30", w)
+	}
+
+	// Cache hit: same path, no regeneration.
+	again, err := GetThumbnailArchive(cbz, "sub/page.png", 30, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != out {
+		t.Errorf("archive thumbnail cache miss: %q != %q", again, out)
+	}
+}
+
+func TestThumbnailMissingArchiveEntryPlaceholder(t *testing.T) {
+	cbz := filepath.Join(t.TempDir(), "book.cbz")
+	buildCBZWithPNG(t, cbz, "page.png", 60, 90)
+	cache := filepath.Join(t.TempDir(), "thumbs")
+
+	out, err := GetThumbnailArchive(cbz, "nope.png", 30, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := widthOf(t, out); w != 30 { // placeholder of the requested width
+		t.Errorf("placeholder width = %d, want 30", w)
 	}
 }
 

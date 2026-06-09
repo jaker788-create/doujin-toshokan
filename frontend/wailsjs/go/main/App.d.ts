@@ -45,6 +45,8 @@ export function Rescan():Promise<void>;
 
 export function Search(arg1:main.SearchArgs):Promise<Array<search.Manga>>;
 
+export function SetDisplayTitle(arg1:number,arg2:string):Promise<search.Manga>;
+
 export function SetNhentaiKey(arg1:string):Promise<void>;
 
 export function StartAutoTag(arg1:main.AutoTagOptions):Promise<void>;
@@ -63,4 +65,6 @@ export function SuggestAuthors(arg1:string):Promise<Array<search.Author>>;
 
 export function SuggestTags(arg1:string):Promise<Array<string>>;
 
-export function UpdateTags(arg1:number,arg2:Array<string>):Promise<Array<tag.Typed>>;
+export function SuggestTagsTyped(arg1:string):Promise<Array<tag.Typed>>;
+
+export function UpdateTags(arg1:number,arg2:Array<tag.Typed>):Promise<Array<tag.Typed>>;

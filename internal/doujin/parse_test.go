@@ -2,8 +2,97 @@ package doujin
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 )
+
+func TestCleanArtist(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"(Rustle)", "Rustle"},
+		{"[Yoku]", "Yoku"},
+		{"  (Airandou)  ", "Airandou"},
+		{"A6-Kisho Muri", "A6-Kisho Muri"},     // hybrid, no wrap
+		{"A6 (Kisho Muri)", "A6 (Kisho Muri)"}, // parens don't enclose the whole string
+		{"(a) (b)", "(a) (b)"},                 // two groups, not one wrap
+		{"((Nested))", "(Nested)"},             // peel one layer
+		{"(Rustle", "(Rustle"},                 // unbalanced
+		{"()", "()"},                           // never clean to empty
+		{"Rustle", "Rustle"},                   // already clean
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := CleanArtist(c.in); got != c.want {
+			t.Errorf("CleanArtist(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseStripsNhentaiPrefix(t *testing.T) {
+	// The downloaded-file prefix "nhentai-<id> - " must be peeled so it neither
+	// pollutes the title nor (as leading text before the first "[") suppresses circle
+	// detection, while the id is captured for the direct gallery lookup.
+	name := "nhentai-271687 - [Kisho-Muri (A6)] Himitsu no Suiyoubi - Secret Wednesdays [English] {Shotachan} [Digital]"
+	p := ParseName(name)
+
+	if p.GalleryID != 271687 {
+		t.Errorf("GalleryID = %d, want 271687", p.GalleryID)
+	}
+	if p.Circle != "Kisho-Muri (A6)" {
+		t.Errorf("Circle = %q, want %q", p.Circle, "Kisho-Muri (A6)")
+	}
+	if p.Author() != "A6" {
+		t.Errorf("Author() = %q, want A6", p.Author())
+	}
+	// The " - " is the romaji/english separator (a Windows-safe stand-in for "|"), so it
+	// normalizes to " / " and the english half is a standalone matchable variant.
+	if p.DisplayTitle() != "Himitsu no Suiyoubi / Secret Wednesdays" {
+		t.Errorf("Title = %q, want %q", p.DisplayTitle(), "Himitsu no Suiyoubi / Secret Wednesdays")
+	}
+	if !slices.Contains(p.TitleVariants(), "Secret Wednesdays") {
+		t.Errorf("TitleVariants %v missing english half %q", p.TitleVariants(), "Secret Wednesdays")
+	}
+	if p.Language != "english" {
+		t.Errorf("Language = %q, want english", p.Language)
+	}
+	if !reflect.DeepEqual(p.MiscTags, []string{"digital"}) {
+		t.Errorf("MiscTags = %v, want [digital]", p.MiscTags)
+	}
+}
+
+func TestDashSeparatorSplitsButKeepsHyphens(t *testing.T) {
+	// " - " (spaced) is a dual-language separator and becomes " / "; hyphens inside
+	// words/names (no surrounding spaces) are preserved.
+	cases := []struct{ name, wantTitle string }{
+		{"[A] Romaji Title - English Title [English]", "Romaji Title / English Title"},
+		{"[bt-T Shounen (Sanada)] Ore-tachi no Jihen", "Ore-tachi no Jihen"}, // intra-word hyphens kept
+		{"[A] Juma-kun Wakaraseru - Teach Juma-kun", "Juma-kun Wakaraseru / Teach Juma-kun"},
+	}
+	for _, c := range cases {
+		if got := ParseName(c.name).DisplayTitle(); got != c.wantTitle {
+			t.Errorf("DisplayTitle(%q) = %q, want %q", c.name, got, c.wantTitle)
+		}
+	}
+}
+
+func TestSourcePrefixVariants(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantID  int64
+		wantRem string
+	}{
+		{"nhentai-271687 - [A] T", 271687, "[A] T"},
+		{"nhentai_99 [A] T", 99, "[A] T"},           // underscore join, no dash
+		{"NHENTAI-5 - Title", 5, "Title"},           // case-insensitive
+		{"[A] Real Title", 0, "[A] Real Title"},     // no prefix: id 0, name untouched
+		{"nhentai- - [A] T", 0, "nhentai- - [A] T"}, // "nhentai-" with no digits: not the pattern
+	}
+	for _, c := range cases {
+		id, rem := sourcePrefix(c.in)
+		if id != c.wantID || rem != c.wantRem {
+			t.Errorf("sourcePrefix(%q) = (%d,%q), want (%d,%q)", c.in, id, rem, c.wantID, c.wantRem)
+		}
+	}
+}
 
 func TestParseRealExample(t *testing.T) {
 	name := "[Eight PM] Do Namaiki na Juma-kun o Mechakucha Wakaraseru _ Teaching the Super Cheeky Juma-kun One Hell of a Lesson [English] {Chin²} [Digital]"
@@ -124,6 +213,85 @@ func TestParseCircleWithArtist(t *testing.T) {
 	}
 	if !reflect.DeepEqual(p.Tags(), []string{"english", "naruto"}) {
 		t.Errorf("Tags = %v, want [english naruto]", p.Tags())
+	}
+	// A single circle has no extra collaborating artists (no regression).
+	if got := p.ExtraArtistNames(); got != nil {
+		t.Errorf("ExtraArtistNames = %v, want nil for a single circle", got)
+	}
+}
+
+func TestExtraArtists(t *testing.T) {
+	// A collaborative work names several artists in consecutive leading […] groups.
+	// The first becomes the primary author (Author()); the rest are ExtraArtistNames(),
+	// each reduced to its artist the same way the circle is, de-duped, primary excluded.
+	cases := []struct {
+		name       string
+		wantCircle string
+		wantAuthor string
+		wantExtras []string
+		wantEvent  string
+		wantTitle  string
+		wantLang   string
+	}{
+		{
+			name:       "[ArtistA] [ArtistB] Title",
+			wantCircle: "ArtistA", wantAuthor: "ArtistA",
+			wantExtras: []string{"ArtistB"}, wantTitle: "Title",
+		},
+		{
+			name:       "[A] [B] [C] Title [English]",
+			wantCircle: "A", wantAuthor: "A",
+			wantExtras: []string{"B", "C"}, wantTitle: "Title", wantLang: "english",
+		},
+		{
+			name:       "[Circle Name (ArtistA)] [Other Circle (ArtistB)] Title",
+			wantCircle: "Circle Name (ArtistA)", wantAuthor: "ArtistA",
+			wantExtras: []string{"ArtistB"}, wantTitle: "Title",
+		},
+		{
+			name:       "(C97) [A] [B] Title",
+			wantCircle: "A", wantAuthor: "A", wantEvent: "C97",
+			wantExtras: []string{"B"}, wantTitle: "Title",
+		},
+		{
+			// Same artist twice collapses to a single primary, no extras.
+			name:       "[Same] [Same] Title",
+			wantCircle: "Same", wantAuthor: "Same",
+			wantExtras: nil, wantTitle: "Title",
+		},
+		{
+			// A language bracket before the title is not an artist (loop stops at it).
+			name:       "[A] [English] Title",
+			wantCircle: "A", wantAuthor: "A",
+			wantExtras: nil, wantTitle: "Title",
+		},
+		{
+			// No circle at all: nothing is an extra artist.
+			name:       "Plain Title [English]",
+			wantCircle: "", wantAuthor: "",
+			wantExtras: nil, wantTitle: "Plain Title", wantLang: "english",
+		},
+	}
+	for _, c := range cases {
+		p := ParseName(c.name)
+		if p.Circle != c.wantCircle {
+			t.Errorf("%q: Circle = %q, want %q", c.name, p.Circle, c.wantCircle)
+		}
+		if p.Author() != c.wantAuthor {
+			t.Errorf("%q: Author() = %q, want %q", c.name, p.Author(), c.wantAuthor)
+		}
+		if got := p.ExtraArtistNames(); !reflect.DeepEqual(got, c.wantExtras) {
+			t.Errorf("%q: ExtraArtistNames() = %v, want %v", c.name, got, c.wantExtras)
+		}
+		if c.wantEvent != "" && p.Event != c.wantEvent {
+			t.Errorf("%q: Event = %q, want %q", c.name, p.Event, c.wantEvent)
+		}
+		if p.Title != c.wantTitle {
+			t.Errorf("%q: Title = %q, want %q", c.name, p.Title, c.wantTitle)
+		}
+		if p.Language != c.wantLang {
+			t.Errorf("%q: Language = %q, want %q", c.name, p.Language, c.wantLang)
+		}
 	}
 }
 

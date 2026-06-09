@@ -28,7 +28,10 @@ type Manga struct {
 	// NhentaiGalleryID is the nhentai gallery a title's tags were copied from, or nil
 	// if it was never auto-tagged. Lets the UI show / re-sync the linked source.
 	NhentaiGalleryID *int64 `json:"nhentai_gallery_id"`
-	AuthorName       string `json:"author_name"`
+	// DisplayTitle is a user-edited title override, or nil when none is set. The UI shows
+	// it instead of Title; Title stays the canonical, matching/Rescan-owned value.
+	DisplayTitle *string `json:"display_title"`
+	AuthorName   string  `json:"author_name"`
 }
 
 // Author is an author row.
@@ -76,12 +79,13 @@ func scanMangaRows(rows *sql.Rows) ([]Manga, error) {
 		var cover sql.NullString
 		var missing int
 		var nhentaiID sql.NullInt64
+		var displayTitle sql.NullString
 		// Column order matches `SELECT m.*, a.name AS author_name` (manga columns in
-		// table-definition order — nhentai_gallery_id was appended by migration 003 —
-		// then the appended author_name).
+		// table-definition order — nhentai_gallery_id was appended by migration 003 and
+		// display_title by migration 006 — then the appended author_name).
 		if err := rows.Scan(
 			&m.ID, &m.Title, &m.AuthorID, &m.FolderPath, &cover, &m.PageCount,
-			&m.DateAdded, &m.DateModified, &missing, &nhentaiID, &m.AuthorName,
+			&m.DateAdded, &m.DateModified, &missing, &nhentaiID, &displayTitle, &m.AuthorName,
 		); err != nil {
 			return nil, err
 		}
@@ -92,6 +96,10 @@ func scanMangaRows(rows *sql.Rows) ([]Manga, error) {
 		if nhentaiID.Valid {
 			id := nhentaiID.Int64
 			m.NhentaiGalleryID = &id
+		}
+		if displayTitle.Valid {
+			dt := displayTitle.String
+			m.DisplayTitle = &dt
 		}
 		m.Missing = missing != 0
 		out = append(out, m)
@@ -116,8 +124,11 @@ func SearchManga(q store.Querier, p SearchParams) ([]Manga, error) {
 		}
 	}
 	if p.Query != "" {
-		where = append(where, "(m.title LIKE ? OR a.name LIKE ?)")
-		args = append(args, "%"+p.Query+"%", "%"+p.Query+"%")
+		// Match the canonical title, the user's display override, or the author — so a
+		// title is findable by its original romaji name OR by whatever it was renamed to.
+		where = append(where, "(m.title LIKE ? OR m.display_title LIKE ? OR a.name LIKE ?)")
+		like := "%" + p.Query + "%"
+		args = append(args, like, like, like)
 	}
 	if p.AuthorID != 0 {
 		where = append(where, "m.author_id = ?")
@@ -178,6 +189,28 @@ func SuggestTags(q store.Querier, prefix string, limit int) ([]string, error) {
 		names = append(names, n)
 	}
 	return names, rows.Err()
+}
+
+// SuggestTagsTyped returns up to limit tags (name + subject) matching prefix
+// (normalized). Like SuggestTags but carrying each tag's stored subject, so the tag
+// editor can auto-fill the subject when the user picks an existing tag.
+func SuggestTagsTyped(q store.Querier, prefix string, limit int) ([]tag.Typed, error) {
+	rows, err := q.Query(
+		"SELECT name, type FROM tags WHERE name LIKE ? ORDER BY name LIMIT ?",
+		ingest.NormalizeTag(prefix)+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []tag.Typed{}
+	for rows.Next() {
+		var tt tag.Typed
+		if err := rows.Scan(&tt.Name, &tt.Type); err != nil {
+			return nil, err
+		}
+		out = append(out, tt)
+	}
+	return out, rows.Err()
 }
 
 // SuggestAuthors returns up to limit authors whose name contains prefix (substring

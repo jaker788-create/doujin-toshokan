@@ -337,6 +337,7 @@ export namespace search {
 	    date_modified: string;
 	    missing: boolean;
 	    nhentai_gallery_id?: number;
+	    display_title?: string;
 	    author_name: string;
 	
 	    static createFrom(source: any = {}) {
@@ -355,6 +356,7 @@ export namespace search {
 	        this.date_modified = source["date_modified"];
 	        this.missing = source["missing"];
 	        this.nhentai_gallery_id = source["nhentai_gallery_id"];
+	        this.display_title = source["display_title"];
 	        this.author_name = source["author_name"];
 	    }
 	}

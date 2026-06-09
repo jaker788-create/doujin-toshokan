@@ -4,8 +4,9 @@
 // The matching problem is cross-language: a local title may be romaji while the
 // online entry is english (or vice-versa), and one title can return several
 // candidate galleries. So a candidate's title score is the max similarity against
-// both the online english and japanese titles, and page count is used both to
-// rank and to gate auto-apply (an exact, unique page match is the strong signal).
+// both the online english and japanese titles. Page count ranks candidates and is one
+// of several routes to auto-apply, but it no longer gates on its own (doujin page
+// counts drift with covers/decensoring/scan group); see qualifies for the routes.
 //
 // This package is pure and dependency-free apart from the nhentai result type, so
 // the scoring and the auto-vs-review decision are fully unit-testable without any
@@ -21,31 +22,38 @@ import (
 )
 
 // Tuning constants for the qualify/merge/decide model. A candidate *qualifies* (is
-// safe to auto-apply) on a full-enough title AND a page count within tolerance.
-// Several qualifiers are the same work in different variations (group/translation/
-// language), so their tags are merged rather than sent to review. Language never
-// gates the decision — it only ranks the primary and is preserved on apply.
+// safe to auto-apply) via one of the routes in qualifies — a strong-enough title or a
+// matching artist, with page count as corroboration rather than a hard gate. Several
+// qualifiers are the same work in different variations (group/translation/language), so
+// their tags are merged rather than sent to review. Language never gates the decision —
+// it only ranks the primary and is preserved on apply.
 const (
-	pageTolerance   = 2    // |localPages - candPages| within this counts as a page match
-	qualifyTitle    = 0.6  // minimum title similarity to be an auto-applicable match
-	mergeTitleDelta = 0.1  // merge only candidates within this of the best qualifying title
-	mergeCap        = 4    // max galleries unioned on a multi-match auto-apply
-	langBoost       = 0.15 // RANKING ONLY — picks the primary; never gates the decision
-	pageBonus       = 0.5  // RANKING ONLY — full when exact, scaled down within tolerance
+	pageTolerance        = 2    // |localPages - candPages| within this counts as a page match
+	qualifyTitle         = 0.6  // minimum title similarity to be an auto-applicable match
+	strongTitleBar       = 0.85 // a near-perfect title alone qualifies (no artist/page corroboration)
+	strongTitleMinTokens = 2    // ...but only when the matched title has at least this many tokens
+	mergeTitleDelta      = 0.1  // merge only candidates within this of the best qualifying title
+	mergeCap             = 4    // max galleries unioned on a multi-match auto-apply
+	langBoost            = 0.15 // RANKING ONLY — picks the primary; never gates the decision
+	pageBonus            = 0.5  // RANKING ONLY — full when exact, scaled down within tolerance
 )
 
 // Candidate is one scored nhentai search result for a local title. The page and
-// language fields feed ranking + display; the auto-vs-review *gate* is PagesClose +
-// TitleScore (see Decide), not the composite Score.
+// language fields feed ranking + display; the auto-vs-review *gate* is a mix of
+// TitleScore, PagesClose/PagesExact, and ArtistMatch (see Decide/qualifies), not the
+// composite Score. ArtistMatch is supplied by the caller (a catalog hit is the artist's
+// by construction); like language it never feeds the ranking Score, only the action.
 type Candidate struct {
 	Gallery      nhentai.SearchResult
 	TitleScore   float64 // max similarity vs the english/japanese online titles, [0,1]
+	MatchTokens  int     // token count of the shorter side of the best-scoring title pair
 	PageDelta    int     // |localPages - gallery pages|; -1 when either count is unknown
 	PagesExact   bool    // page counts match exactly (delta 0, both > 0)
 	PagesClose   bool    // page counts within pageTolerance (both > 0)
 	Lang         string  // language detected for this candidate ("" if unknown)
 	LangMatch    bool    // candidate language equals the local language (both known)
 	LangMismatch bool    // candidate language differs from a known local language
+	ArtistMatch  bool    // candidate's artist equals the local artist (gates the action, not Score)
 	Score        float64 // ranking score (title + page + language); ordering only
 }
 
@@ -88,18 +96,22 @@ func englishFamily(s string) bool { return s == "english" || s == "translated" }
 // half of a "romaji | english" online title without the romaji half — or a leading
 // event/magazine — diluting the score. The page and language terms feed the ranking
 // Score (which picks the primary among equally-good titles); they are not the auto gate.
-func Score(titleVariants []string, localPages int, localLang, candLang string, c nhentai.SearchResult) Candidate {
+func Score(titleVariants []string, localPages int, localLang, candLang string, artistMatch bool, c nhentai.SearchResult) Candidate {
 	ts := 0.0
+	tokens := 0
 	candParts := append(titleParts(c.EnglishTitle), titleParts(c.JapaneseTitle)...)
 	for _, v := range titleVariants {
 		for _, cp := range candParts {
 			if s := Similarity(v, cp); s > ts {
 				ts = s
+				// Specificity of the winning pair: the shorter side's token count, so a
+				// one-word generic title can't clear the strong-title-alone bar unaided.
+				tokens = min(len(strings.Fields(Normalize(v))), len(strings.Fields(Normalize(cp))))
 			}
 		}
 	}
 
-	cand := Candidate{Gallery: c, TitleScore: ts, Lang: candLang, PageDelta: -1, Score: ts}
+	cand := Candidate{Gallery: c, TitleScore: ts, MatchTokens: tokens, Lang: candLang, ArtistMatch: artistMatch, PageDelta: -1, Score: ts}
 
 	if localPages > 0 && c.NumPages > 0 {
 		delta := localPages - c.NumPages
@@ -129,27 +141,58 @@ func Score(titleVariants []string, localPages int, localLang, candLang string, c
 }
 
 // ScoreAll scores every result against the local title variants. candLang resolves a
-// result's language (the app injects doujin.DetectLanguage over its titles); a nil
-// resolver means "language unknown" for every candidate.
-func ScoreAll(titleVariants []string, localPages int, localLang string, results []nhentai.SearchResult, candLang func(nhentai.SearchResult) string) []Candidate {
+// result's language (the app injects doujin.DetectLanguage over its titles) and
+// artistMatch reports whether the result is by the local artist (the app marks catalog
+// hits true by construction); a nil resolver means "unknown"/false for every candidate.
+func ScoreAll(titleVariants []string, localPages int, localLang string, results []nhentai.SearchResult, candLang func(nhentai.SearchResult) string, artistMatch func(nhentai.SearchResult) bool) []Candidate {
 	out := make([]Candidate, 0, len(results))
 	for _, r := range results {
 		cl := ""
 		if candLang != nil {
 			cl = candLang(r)
 		}
-		out = append(out, Score(titleVariants, localPages, localLang, cl, r))
+		am := false
+		if artistMatch != nil {
+			am = artistMatch(r)
+		}
+		out = append(out, Score(titleVariants, localPages, localLang, cl, am, r))
 	}
 	return out
 }
 
-// Decide ranks candidates best-first and chooses auto vs review. A candidate
-// *qualifies* when its page count is within tolerance AND its title clears
-// qualifyTitle. If any candidate qualifies the action is auto, and Apply holds the
-// qualifying variants whose title is within mergeTitleDelta of the best one (the same
-// work in different group/translation/language — their tags get merged), capped at
-// mergeCap and ordered best-first so Apply[0] is the primary. With no qualifier the
-// match isn't close enough → review. Language never changes the action.
+// qualifies reports whether a candidate is safe to auto-apply. Page count is an
+// unreliable gate for doujin (covers, decensored, scan group all shift it), so a strong
+// enough signal on *either* the title or the artist carries it — page closeness is only
+// one of several routes:
+//
+//	(a) close pages + a decent title   — the original strong signal
+//	(b) the right artist + a decent title (pages need not be close)
+//	(c) the right artist + exact pages  (covers a weak title, e.g. romaji-vs-english)
+//	(d) a near-perfect, specific title alone (when no artist could be resolved)
+//
+// Language never participates (it only ranks the primary).
+func qualifies(c Candidate) bool {
+	switch {
+	case c.PagesClose && c.TitleScore >= qualifyTitle:
+		return true
+	case c.ArtistMatch && c.TitleScore >= qualifyTitle:
+		return true
+	case c.ArtistMatch && c.PagesExact:
+		return true
+	case c.TitleScore >= strongTitleBar && c.MatchTokens >= strongTitleMinTokens:
+		return true
+	}
+	return false
+}
+
+// Decide ranks candidates best-first and chooses auto vs review. If any candidate
+// qualifies (see qualifies) the action is auto, and Apply holds the qualifying variants
+// whose title is within mergeTitleDelta of the best one AND whose page count is close to
+// the primary's (the same work in different group/translation/language — their tags get
+// merged; the page guard stops a near-identically-titled but differently-sized work, e.g.
+// a zenpen/kouhen part pair, from merging now that pages no longer gate qualification),
+// capped at mergeCap and ordered best-first so Apply[0] is the primary. With no qualifier
+// the match isn't close enough → review. Language never changes the action.
 func Decide(cands []Candidate) Decision {
 	ranked := make([]Candidate, len(cands))
 	copy(ranked, cands)
@@ -171,7 +214,7 @@ func Decide(cands []Candidate) Decision {
 	var qualifying []Candidate
 	maxTitle := 0.0
 	for _, c := range ranked {
-		if c.PagesClose && c.TitleScore >= qualifyTitle {
+		if qualifies(c) {
 			qualifying = append(qualifying, c)
 			if c.TitleScore > maxTitle {
 				maxTitle = c.TitleScore
@@ -179,22 +222,41 @@ func Decide(cands []Candidate) Decision {
 		}
 	}
 	if len(qualifying) == 0 {
-		return d // nothing close enough on both title and pages — human review
+		return d // nothing close enough — human review
 	}
 
 	// Merge the near-identical variants: qualifiers within mergeTitleDelta of the best
 	// title (so a weak-but-qualifying straggler is dropped when a clearly better match
-	// exists), in ranked order, capped. Apply[0] is the primary.
+	// exists), in ranked order, capped. Apply[0] is the primary; a secondary must also be
+	// page-close to the primary so a same-titled but differently-sized work isn't merged.
 	for _, c := range qualifying {
-		if c.TitleScore >= maxTitle-mergeTitleDelta {
-			d.Apply = append(d.Apply, c)
-			if len(d.Apply) >= mergeCap {
-				break
-			}
+		if c.TitleScore < maxTitle-mergeTitleDelta {
+			continue
+		}
+		if len(d.Apply) > 0 && !pagesCloseTo(d.Apply[0].Gallery.NumPages, c.Gallery.NumPages) {
+			continue
+		}
+		d.Apply = append(d.Apply, c)
+		if len(d.Apply) >= mergeCap {
+			break
 		}
 	}
 	d.Action = ActionAuto
 	return d
+}
+
+// pagesCloseTo reports whether two known page counts are within pageTolerance. Unknown
+// counts (<= 0 on either side) are treated as close, so a missing count never blocks a
+// merge that the title already justified.
+func pagesCloseTo(a, b int) bool {
+	if a <= 0 || b <= 0 {
+		return true
+	}
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= pageTolerance
 }
 
 // lenRatioFloor is the minimum short/long normalized-length ratio for the

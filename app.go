@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -182,7 +181,7 @@ func (a *App) GetManga(id int64) (*MangaDetail, error) {
 	_, statErr := os.Stat(m.FolderPath)
 	missing := statErr != nil
 	if !missing {
-		pages = scanner.ListPages(m.FolderPath)
+		pages = scanner.PagesFor(m.FolderPath)
 	}
 	tags, err := search.GetMangaTagsTyped(a.db, id)
 	if err != nil {
@@ -196,17 +195,24 @@ func (a *App) SuggestTags(q string) ([]string, error) {
 	return search.SuggestTags(a.db, q, 10)
 }
 
+// SuggestTagsTyped returns tag completions with their subjects for the tag editor, so
+// picking an existing tag can auto-fill its subject.
+func (a *App) SuggestTagsTyped(q string) ([]tag.Typed, error) {
+	return search.SuggestTagsTyped(a.db, q, 10)
+}
+
 // SuggestAuthors returns author {id,name} matches for the filter builder.
 func (a *App) SuggestAuthors(q string) ([]search.Author, error) {
 	return search.SuggestAuthors(a.db, q, 10)
 }
 
 // UpdateTags replaces a manga's tags and returns the saved set (with subjects,
-// ordered) so the UI can re-render its grouped chips. The incoming names are freeform
-// manual edits (General subject); any that match an existing typed tag keep that tag's
-// subject (GetOrCreateTag never downgrades), so editing tags by name doesn't strip the
-// subjects that nhentai or the folder parser assigned. Errors if the manga is gone.
-func (a *App) UpdateTags(id int64, tags []string) ([]tag.Typed, error) {
+// ordered) so the UI can re-render its grouped chips. The incoming tags carry the
+// subject the user chose in the editor; a tag that already exists keeps its stored
+// subject (GetOrCreateTag upgrades General -> typed but never changes an existing
+// typed subject), so editing tags never strips or shuffles the subjects that nhentai
+// or the folder parser assigned. Errors if the manga is gone.
+func (a *App) UpdateTags(id int64, tags []tag.Typed) ([]tag.Typed, error) {
 	m, err := search.GetManga(a.db, id)
 	if err != nil {
 		return nil, err
@@ -214,7 +220,27 @@ func (a *App) UpdateTags(id int64, tags []string) ([]tag.Typed, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manga %d not found", id)
 	}
-	return ingest.SetMangaTags(a.db, id, generalTags(tags))
+	return ingest.SetMangaTags(a.db, id, tags)
+}
+
+// SetDisplayTitle sets (or clears) a manga's user-facing display-title override and
+// returns the updated row so the UI can re-render. The canonical `title` — which drives
+// nhentai matching and is refreshed by Rescan — is deliberately left untouched. An empty
+// or whitespace-only title clears the override (stores NULL), reverting the display to the
+// canonical title. Errors if the manga is gone.
+func (a *App) SetDisplayTitle(id int64, title string) (*search.Manga, error) {
+	var arg any // NULL when cleared, so DisplayTitle scans back as nil and the UI falls back.
+	if t := strings.TrimSpace(title); t != "" {
+		arg = t
+	}
+	res, err := a.db.Exec("UPDATE manga SET display_title=? WHERE id=?", arg, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("manga %d not found", id)
+	}
+	return search.GetManga(a.db, id)
 }
 
 // GetUnimported returns title folders found under the library roots that are not
@@ -251,7 +277,10 @@ func (a *App) GetUnimported() ([]UnimportedPreview, error) {
 //   - Author: the author folder when present (organized layout / UI-provided),
 //     otherwise the artist/circle parsed from the name, otherwise "Unknown".
 func mangaInputFromFolder(d scanner.DetectedFolder, extraTags []string) ingest.MangaInput {
-	rawName := filepath.Base(d.FolderPath)
+	// For an archive title FolderPath is the .cbz/.zip file; TitleNameFor strips that
+	// extension so the parsed title and implied tags come from the decorated name,
+	// not "foo.cbz". For a folder it is just the base name (unchanged behavior).
+	rawName := scanner.TitleNameFor(d.FolderPath)
 	p := doujin.ParseName(rawName)
 
 	title := p.DisplayTitle()
@@ -264,9 +293,12 @@ func mangaInputFromFolder(d scanner.DetectedFolder, extraTags []string) ingest.M
 		title = t
 	}
 
-	author := strings.TrimSpace(d.Author)
+	// Strip a wrapping "(Artist)"/"[Artist]" from the folder/derived name so the stored
+	// author is the bare artist (matching the nhentai tag used for auto-tagging); a hybrid
+	// or already-bare name is left as-is.
+	author := doujin.CleanArtist(strings.TrimSpace(d.Author))
 	if author == "" {
-		if author = p.Author(); author == "" {
+		if author = doujin.CleanArtist(p.Author()); author == "" {
 			author = "Unknown"
 		}
 	}
@@ -283,9 +315,11 @@ func mangaInputFromFolder(d scanner.DetectedFolder, extraTags []string) ingest.M
 }
 
 // parsedTypedTags maps a parsed folder name's decorations onto subjected tags: the
-// language as a Language tag, each parody as a Parody tag, and the misc content tags
-// (digital, decensored, …) as generic Tag-subject tags. The doujin parser stays pure
-// (it knows the parts but not our subject vocabulary); this is where the two meet.
+// language as a Language tag, each parody as a Parody tag, the misc content tags
+// (digital, decensored, …) as generic Tag-subject tags, and any additional artists of
+// a collaborative "[A] [B] Title" name as Artist tags (the first artist still becomes
+// the single primary author elsewhere). The doujin parser stays pure (it knows the
+// parts but not our subject vocabulary); this is where the two meet.
 func parsedTypedTags(p doujin.Parsed) []tag.Typed {
 	var out []tag.Typed
 	add := func(name, typ string) {
@@ -299,6 +333,9 @@ func parsedTypedTags(p doujin.Parsed) []tag.Typed {
 	}
 	for _, m := range p.MiscTags {
 		add(m, tag.Tag)
+	}
+	for _, artist := range p.ExtraArtistNames() {
+		add(doujin.CleanArtist(artist), tag.Artist)
 	}
 	return out
 }
@@ -385,11 +422,12 @@ func (a *App) Rescan() error {
 			}
 			continue
 		}
-		n := len(scanner.ListPages(r.path))
-		p := doujin.ParseName(filepath.Base(r.path))
+		n := len(scanner.PagesFor(r.path))
+		rawName := scanner.TitleNameFor(r.path)
+		p := doujin.ParseName(rawName)
 		title := p.DisplayTitle()
 		if strings.TrimSpace(title) == "" {
-			title = filepath.Base(r.path)
+			title = rawName
 		}
 		if _, err := a.db.Exec(
 			"UPDATE manga SET missing=0, page_count=?, title=? WHERE id=?", n, title, r.id); err != nil {
