@@ -97,8 +97,6 @@ const authorNames: Record<string, string> = {};
 // Cleanup for the current view's document-level listeners/observers; run before
 // rendering the next view so nothing leaks across views.
 let viewCleanup: (() => void) | null = null;
-// Close handler for an open lightbox, so route changes can dismiss it.
-let closeLightbox: (() => void) | null = null;
 let uid = 0;
 
 // ───── stash / navigation memory ──────────────────────────────────
@@ -134,6 +132,31 @@ function imageURL(path: string): string {
 }
 function thumbURL(path: string, w = 240): string {
     return `/thumb?path=${encodeURIComponent(path)}&w=${w}`;
+}
+
+// ───── persisted reader preferences ───────────────────────────────
+// The reader remembers, across titles and app restarts, whether you last read in
+// scroll or page mode and (for page mode) whether pages fit the screen or the width.
+// These are the app's only client-side prefs; localStorage access is guarded so a
+// locked/partitioned WebView store never breaks rendering.
+type ReaderMode = 'scroll' | 'page';
+function lsGet(key: string): string | null {
+    try { return localStorage.getItem(key); } catch { return null; }
+}
+function lsSet(key: string, val: string): void {
+    try { localStorage.setItem(key, val); } catch { /* storage disabled — ignore */ }
+}
+function getReaderMode(): ReaderMode {
+    return lsGet('reader.mode') === 'page' ? 'page' : 'scroll';
+}
+function setReaderMode(m: ReaderMode): void {
+    lsSet('reader.mode', m);
+}
+function getReaderFitWidth(): boolean {
+    return lsGet('reader.fitWidth') === '1';
+}
+function setReaderFitWidth(on: boolean): void {
+    lsSet('reader.fitWidth', on ? '1' : '0');
 }
 
 // ───── nhentai cover (remote) ─────────────────────────────────────
@@ -229,7 +252,6 @@ function parseRoute(): Route {
 }
 
 async function render(): Promise<void> {
-    if (closeLightbox) closeLightbox();
     if (viewCleanup) { viewCleanup(); viewCleanup = null; }
     const r = parseRoute();
     try {
@@ -560,8 +582,26 @@ function wireBuilder(filter: Filter): void {
 function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): string {
     const m = d.manga;
     const tagrow = renderTagRow(d.tags);
+    const mode = getReaderMode();
+    const fitWidth = getReaderFitWidth();
     const gallery = d.pages.map((p, i) =>
         `<img loading="lazy" src="${imageURL(p)}" alt="page ${i + 1}" data-page="${i + 1}">`).join('');
+    // Page mode's contents grid: a large thumbnail per page; clicking one opens the viewer.
+    const grid = d.pages.map((p, i) =>
+        `<button class="pg-thumb" type="button" data-idx="${i}" aria-label="Read from page ${i + 1}"><img loading="lazy" src="${thumbURL(p, 320)}" alt="page ${i + 1}"><span class="pg-num">${i + 1}</span></button>`).join('');
+    // Top toggle bar: switch scroll ⇄ page, and (page mode) whole-page ⇄ fit-width.
+    const modeBar = d.pages.length
+        ? `<div class="reader-modes" role="group" aria-label="Reader mode">
+             <div class="seg reader-mode-seg">
+               <button type="button" class="seg-btn" data-mode="scroll" aria-pressed="${mode === 'scroll'}">Scroll</button>
+               <button type="button" class="seg-btn" data-mode="page" aria-pressed="${mode === 'page'}">Page</button>
+             </div>
+             <div class="seg reader-fit-seg"${mode === 'page' ? '' : ' hidden'}>
+               <button type="button" class="seg-btn" data-fit="whole" aria-pressed="${!fitWidth}">Whole</button>
+               <button type="button" class="seg-btn" data-fit="width" aria-pressed="${fitWidth}">Width</button>
+             </div>
+           </div>`
+        : '';
     const counter = d.pages.length
         ? `<div class="reader-counter" data-total="${d.pages.length}"><span class="cur">1</span><span class="sep">/</span><span class="tot">${d.pages.length}</span></div>
            <aside class="reader-help"><kbd>←</kbd><kbd>→</kbd> page · <kbd>F</kbd> fit · <kbd>⌫</kbd> back</aside>`
@@ -573,6 +613,7 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
     return `
     <a class="back-link" href="${esc(backHref)}">${esc(backLabel)}</a>
     <a class="reader-back" href="${esc(backHref)}" aria-label="${esc(backLabel)}" title="${esc(backLabel)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></a>
+    ${modeBar}
     <header class="title-header">
         <div class="title-edit" data-manga="${m.id}">
             <h1 class="title-text">${esc(displayTitle(m))}</h1>
@@ -612,6 +653,7 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
         ${notice}
     </header>
     <div class="gallery">${gallery}</div>
+    <div class="page-grid">${grid}</div>
     ${counter}`;
 }
 
@@ -651,42 +693,48 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
         }
     });
 
+    const d = detail; // MangaDetail (pages/tags/manga); mirrors readerMarkup's param name
     const pageImgs = Array.from(viewEl().querySelectorAll<HTMLImageElement>('.gallery img'));
+    const pageGrid = viewEl().querySelector('.page-grid') as HTMLElement | null;
     const counterCur = viewEl().querySelector('.reader-counter .cur') as HTMLElement | null;
     const helpHint = viewEl().querySelector('.reader-help') as HTMLElement | null;
+    const modesBar = viewEl().querySelector('.reader-modes') as HTMLElement | null;
+    const modeSeg = modesBar?.querySelector('.reader-mode-seg') as HTMLElement | null;
+    const fitSeg = modesBar?.querySelector('.reader-fit-seg') as HTMLElement | null;
     let currentIdx = 0;
     let helpShown = false;
     let io: IntersectionObserver | null = null;
     let saveTimer: number | undefined;
+    let viewerClose: (() => void) | null = null; // set while the fullscreen viewer is open
+    // Live reader prefs (seeded from localStorage, mirrored back on every toggle).
+    let mode = getReaderMode();
+    let fitWidth = getReaderFitWidth();
 
     // Track the open title so the header save button can stash it with its live page.
     readerState = { id, title: displayTitle(detail.manga), page: 0 };
 
-    // Resume affordance for a saved title tab: a dismissable pill that jumps to the
-    // page you left off on.
-    if (stashEntry && stashEntry.last_page > 0 && pageImgs.length > 0) {
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'resume-pill';
-        pill.textContent = `↩ Resume page ${stashEntry.last_page + 1}`;
-        pill.addEventListener('click', () => {
-            scrollToPage(stashEntry.last_page);
-            pill.remove();
-        });
-        viewEl().appendChild(pill);
-        setTimeout(() => pill.classList.add('visible'), 50);
-        setTimeout(() => pill.remove(), 8000);
-    }
-
+    const clampIdx = (i: number) => Math.max(0, Math.min(d.pages.length - 1, i));
     const scrollToPage = (i: number) => {
-        const target = pageImgs[Math.max(0, Math.min(pageImgs.length - 1, i))];
+        const target = pageImgs[clampIdx(i)];
         if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     };
     const preloadNeighbors = (i: number) => {
         [i + 1, i + 2].forEach((j) => {
-            const img = pageImgs[j];
-            if (img && img.src) { const p = new Image(); p.src = img.src; }
+            const p = d.pages[j];
+            if (p) { const im = new Image(); im.src = imageURL(p); }
         });
+    };
+    // Commit a page as "current": update the counter, remember it on readerState (for the
+    // header save button), preload ahead, and debounce-persist it for a saved title tab.
+    // Shared by the scroll observer and the fullscreen viewer so both track progress alike.
+    const commitProgress = (idx: number) => {
+        if (readerState) readerState.page = idx;
+        if (counterCur) counterCur.textContent = String(idx + 1);
+        preloadNeighbors(idx);
+        if (stashId) {
+            window.clearTimeout(saveTimer);
+            saveTimer = window.setTimeout(() => { StashSetPage(stashId, idx); }, 500);
+        }
     };
     const showHelp = () => {
         if (helpShown || !helpHint) return;
@@ -695,8 +743,9 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
         setTimeout(() => helpHint.classList.remove('visible'), 3500);
     };
 
+    // Scroll mode uses an IntersectionObserver to track the most-visible page; it's
+    // disconnected in page mode and re-observed on the way back (see applyMode).
     if (counterCur && 'IntersectionObserver' in window) {
-        const cur = counterCur;
         let pending = false;
         const visibility = new Map<Element, number>();
         io = new IntersectionObserver((entries) => {
@@ -713,19 +762,134 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
                 });
                 if (bestIdx !== currentIdx) {
                     currentIdx = bestIdx;
-                    cur.textContent = String(bestIdx + 1);
-                    preloadNeighbors(bestIdx);
-                    if (readerState) readerState.page = bestIdx;
-                    // Persist reading progress for a saved title tab, debounced so a
-                    // fast scroll doesn't spam the backend.
-                    if (stashId) {
-                        window.clearTimeout(saveTimer);
-                        saveTimer = window.setTimeout(() => { StashSetPage(stashId, bestIdx); }, 500);
-                    }
+                    commitProgress(bestIdx);
                 }
             });
         }, { threshold: [0, 0.25, 0.5, 0.75, 1] });
-        pageImgs.forEach((img) => io!.observe(img));
+    }
+
+    // Fullscreen single-page viewer. Opened from a thumbnail in page mode; a body-level
+    // overlay (escapes #view's stacking context) showing one full page. Swipe / click-zones
+    // / arrow keys turn the page; ✕ / Esc / ⌫ return to the contents grid. No toggles while
+    // reading. Progress is committed exactly like scroll mode, so resume keeps working.
+    const openPageViewer = (startIdx: number) => {
+        if (!d.pages.length || viewerClose) return;
+        let idx = clampIdx(startIdx);
+        const box = document.createElement('div');
+        box.className = 'page-viewer';
+        box.dataset.fit = fitWidth ? 'width' : 'whole';
+        box.innerHTML = `
+            <button class="pv-close" type="button" aria-label="Back to pages">✕</button>
+            <img class="pv-img" alt="">
+            <div class="pv-counter"><span class="pv-cur">1</span><span class="pv-sep">/</span><span class="pv-tot">${d.pages.length}</span></div>`;
+        const imgEl = box.querySelector('.pv-img') as HTMLImageElement;
+        const curEl = box.querySelector('.pv-cur') as HTMLElement;
+        // The ✕ + counter auto-hide so they don't sit over the art; any pointer move or tap
+        // surfaces them again for a couple of seconds.
+        let chromeTimer: number | undefined;
+        const revealChrome = () => {
+            box.classList.remove('chrome-off');
+            window.clearTimeout(chromeTimer);
+            chromeTimer = window.setTimeout(() => box.classList.add('chrome-off'), 2500);
+        };
+        const show = (i: number) => {
+            idx = clampIdx(i);
+            currentIdx = idx;
+            imgEl.src = imageURL(d.pages[idx]);
+            curEl.textContent = String(idx + 1);
+            box.scrollTop = 0;
+            commitProgress(idx);
+        };
+        const close = () => {
+            window.clearTimeout(chromeTimer);
+            box.remove();
+            document.removeEventListener('keydown', onViewerKey, true);
+            viewerClose = null;
+        };
+        const onViewerKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); e.stopPropagation(); close(); }
+            else if (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'PageUp') { e.preventDefault(); e.stopPropagation(); show(idx - 1); }
+            else if (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); show(idx + 1); }
+            else if (e.key === 'f' || e.key === 'F') {
+                e.preventDefault(); e.stopPropagation();
+                fitWidth = !fitWidth; setReaderFitWidth(fitWidth);
+                box.dataset.fit = fitWidth ? 'width' : 'whole'; applyFit();
+            }
+        };
+        // Turn pages with a horizontal swipe / click-zone (LTR: drag left or tap right =
+        // next). A vertical swipe (up or down) dismisses the viewer — the touch-friendly
+        // close. In fit-width mode (which scrolls vertically) it only fires from the top edge
+        // so it doesn't fight the scroll.
+        let ptStart: { x: number; y: number } | null = null;
+        box.addEventListener('pointerdown', (e) => {
+            revealChrome();
+            if ((e.target as HTMLElement).closest('.pv-close')) return;
+            ptStart = { x: e.clientX, y: e.clientY };
+        });
+        box.addEventListener('pointermove', revealChrome);
+        box.addEventListener('pointercancel', () => { ptStart = null; });
+        box.addEventListener('pointerup', (e) => {
+            if (!ptStart || (e.target as HTMLElement).closest('.pv-close')) { ptStart = null; return; }
+            const dx = e.clientX - ptStart.x;
+            const dy = e.clientY - ptStart.y;
+            const startY = ptStart.y;
+            ptStart = null;
+            if (Math.abs(dy) > 70 && Math.abs(dy) > Math.abs(dx) && (box.dataset.fit !== 'width' || (startY < 80 && box.scrollTop <= 0))) {
+                close(); return;
+            }
+            if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) show(dx < 0 ? idx + 1 : idx - 1);
+            else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) show(e.clientX > window.innerWidth * 0.4 ? idx + 1 : idx - 1);
+        });
+        (box.querySelector('.pv-close') as HTMLButtonElement).addEventListener('click', close);
+        document.addEventListener('keydown', onViewerKey, true);
+        document.body.appendChild(box);
+        viewerClose = close;
+        revealChrome();
+        show(idx);
+    };
+
+    // Contents grid: click a thumbnail to start reading at that page.
+    pageGrid?.addEventListener('click', (e) => {
+        const b = (e.target as HTMLElement).closest('.pg-thumb') as HTMLElement | null;
+        if (b) openPageViewer(Number(b.dataset.idx) || 0);
+    });
+
+    // Apply the top-level mode: scroll gallery vs. page contents-grid. The fullscreen
+    // viewer is a separate on-demand overlay, so page mode itself never hovers over content.
+    const applyMode = (align: boolean) => {
+        document.body.dataset.reader = mode === 'page' ? 'grid' : 'scroll';
+        modeSeg?.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) =>
+            b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+        fitSeg?.toggleAttribute('hidden', mode !== 'page');
+        if (mode === 'page') {
+            io?.disconnect();
+        } else {
+            pageImgs.forEach((img) => io?.observe(img));
+            if (align) scrollToPage(currentIdx);
+        }
+    };
+    const applyFit = () => {
+        fitSeg?.querySelectorAll<HTMLButtonElement>('[data-fit]').forEach((b) =>
+            b.setAttribute('aria-pressed', String((b.dataset.fit === 'width') === fitWidth)));
+    };
+
+    // Resume affordance for a saved title tab: a dismissable pill that jumps to the page
+    // you left off on — scroll mode scrolls there, page mode opens the viewer at it.
+    if (stashEntry && stashEntry.last_page > 0 && d.pages.length > 0) {
+        const target = stashEntry.last_page;
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'resume-pill';
+        pill.textContent = `↩ Resume page ${target + 1}`;
+        pill.addEventListener('click', () => {
+            currentIdx = target;
+            if (mode === 'page') openPageViewer(target);
+            else scrollToPage(target);
+            pill.remove();
+        });
+        viewEl().appendChild(pill);
+        setTimeout(() => pill.classList.add('visible'), 50);
+        setTimeout(() => pill.remove(), 8000);
     }
 
     const onScrollOnce = () => showHelp();
@@ -760,32 +924,55 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     window.addEventListener('mousemove', onBackMouse, { passive: true });
 
     const onKey = (e: KeyboardEvent) => {
-        if (document.querySelector('.lightbox')) return;
+        if (viewerClose) return; // the fullscreen viewer handles its own keys
         const t = e.target as HTMLElement | null;
         if (t && t.matches && t.matches('input, textarea, select')) return;
-        if (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'PageUp') {
-            e.preventDefault(); scrollToPage(currentIdx - 1); showHelp();
-        } else if (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'PageDown' || e.key === ' ') {
-            e.preventDefault(); scrollToPage(currentIdx + 1); showHelp();
-        } else if (e.key === 'f' || e.key === 'F') {
-            e.preventDefault();
-            if (document.body.dataset.fit === 'height') delete document.body.dataset.fit;
-            else document.body.dataset.fit = 'height';
-            showHelp();
-        } else if (e.key === 'Backspace') {
+        if (e.key === 'Backspace') {
             // Return to the list/results. preventDefault stops the WebView's own
-            // history-back; the input/lightbox guards above keep tag-editing safe.
+            // history-back; the input guard above keeps tag-editing safe.
             e.preventDefault();
             location.hash = backHref;
+        } else if (e.key === 'f' || e.key === 'F') {
+            e.preventDefault();
+            // Page mode's fit (Whole⇄Width) governs the viewer and persists; scroll mode
+            // keeps its transient fit-to-height.
+            if (mode === 'page') { fitWidth = !fitWidth; setReaderFitWidth(fitWidth); applyFit(); }
+            else if (document.body.dataset.fit === 'height') delete document.body.dataset.fit;
+            else document.body.dataset.fit = 'height';
+            showHelp();
+        } else if (mode === 'scroll' && (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'PageUp')) {
+            e.preventDefault(); scrollToPage(currentIdx - 1); showHelp();
+        } else if (mode === 'scroll' && (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'PageDown' || e.key === ' ')) {
+            e.preventDefault(); scrollToPage(currentIdx + 1); showHelp();
         }
     };
     document.addEventListener('keydown', onKey);
 
-    pageImgs.forEach((img, i) => img.addEventListener('click', () => openLightbox(pageImgs, i)));
+    // Mode / fit toggle bar.
+    modeSeg?.addEventListener('click', (e) => {
+        const b = (e.target as HTMLElement).closest('[data-mode]') as HTMLElement | null;
+        if (!b) return;
+        const m: ReaderMode = b.dataset.mode === 'page' ? 'page' : 'scroll';
+        if (m === mode) return;
+        mode = m; setReaderMode(mode); applyMode(true);
+    });
+    fitSeg?.addEventListener('click', (e) => {
+        const b = (e.target as HTMLElement).closest('[data-fit]') as HTMLElement | null;
+        if (!b) return;
+        const w = b.dataset.fit === 'width';
+        if (w === fitWidth) return;
+        fitWidth = w; setReaderFitWidth(fitWidth); applyFit();
+    });
+
     wireTagEditor(id, detail.tags);
     wireTitleEditor(id, detail.manga);
 
+    // First paint: reflect the remembered mode/fit (no scroll animation on load).
+    applyFit();
+    applyMode(false);
+
     viewCleanup = () => {
+        if (viewerClose) viewerClose();
         document.removeEventListener('keydown', onKey);
         window.removeEventListener('scroll', onScrollOnce);
         window.removeEventListener('scroll', onBackScroll);
@@ -793,10 +980,11 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
         window.clearTimeout(hideTimer);
         io?.disconnect();
         window.clearTimeout(saveTimer);
-        // Flush the final page so leaving mid-scroll doesn't lose the last move.
+        // Flush the final page so leaving mid-read doesn't lose the last move.
         if (stashId && readerState) StashSetPage(stashId, readerState.page);
         readerState = null;
         delete document.body.dataset.fit;
+        delete document.body.dataset.reader;
     };
 }
 
@@ -1121,41 +1309,6 @@ function buildMatchPicker(
         list.appendChild(row);
     });
     return wrap;
-}
-
-// ───── lightbox ───────────────────────────────────────────────────
-function openLightbox(imgs: HTMLImageElement[], startIdx: number): void {
-    if (!imgs.length) return;
-    let idx = Math.max(0, Math.min(imgs.length - 1, startIdx));
-    const box = document.createElement('div');
-    box.className = 'lightbox';
-    box.innerHTML = `
-        <button class="lb-nav lb-prev" type="button" aria-label="Previous">‹</button>
-        <img src="${imgs[idx].src}" alt="">
-        <button class="lb-nav lb-next" type="button" aria-label="Next">›</button>
-        <button class="lb-close" type="button" aria-label="Close">×</button>`;
-    const imgEl = box.querySelector('img') as HTMLImageElement;
-    const show = (i: number) => { idx = (i + imgs.length) % imgs.length; imgEl.src = imgs[idx].src; };
-    const onKey = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
-        else if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); show(idx - 1); }
-        else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); show(idx + 1); }
-    };
-    function close(): void {
-        box.remove();
-        document.removeEventListener('keydown', onKey, true);
-        closeLightbox = null;
-    }
-    box.addEventListener('click', (e) => {
-        const t = e.target as HTMLElement;
-        if (t.classList.contains('lb-prev')) { e.stopPropagation(); show(idx - 1); }
-        else if (t.classList.contains('lb-next')) { e.stopPropagation(); show(idx + 1); }
-        else if (t.classList.contains('lb-close')) { e.stopPropagation(); close(); }
-        else if (t === box) close();
-    });
-    document.addEventListener('keydown', onKey, true);
-    document.body.appendChild(box);
-    closeLightbox = close;
 }
 
 // ───── stash view (saved pages / "tabs") ──────────────────────────
