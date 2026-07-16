@@ -31,8 +31,6 @@ frontend (no framework).
 - `frontend/src/` — the TypeScript SPA (`main.ts`) + `theme.css`. It's a **hash-based router with no framework**: all view state lives in the URL hash (`#/`, `#/manga/{id}`, `#/stash`, `#/scan`), so a "page" is just a hash string. `frontend/public/` holds fonts + the noise texture; `frontend/wailsjs/` is **generated bindings — never hand-edit; `wails build`/`wails generate module` regenerate them from `app.go`'s exported methods**.
 - `build/` — Wails build config (icons, manifests, NSIS installer template).
 
-- Search the codebase with the MCP prior to using grep unless you have a known narrow target already.
-
 Metadata (authors, titles, tags, page counts, paths) lives in SQLite at
 `%APPDATA%/doujin/doujin.db`, opened in place. Thumbnails are disk-cached in
 `%APPDATA%/doujin/thumbs/`. No files in the library are ever moved or modified.

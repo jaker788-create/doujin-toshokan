@@ -1,5 +1,5 @@
-// Package autotag matches a local title against nhentai search results and decides
-// whether the best candidate is safe to auto-apply or should go to human review.
+// Package autotag matches a local title against a provider's search results and
+// decides whether the best candidate is safe to auto-apply or should go to review.
 //
 // The matching problem is cross-language: a local title may be romaji while the
 // online entry is english (or vice-versa), and one title can return several
@@ -8,9 +8,9 @@
 // of several routes to auto-apply, but it no longer gates on its own (doujin page
 // counts drift with covers/decensoring/scan group); see qualifies for the routes.
 //
-// This package is pure and dependency-free apart from the nhentai result type, so
-// the scoring and the auto-vs-review decision are fully unit-testable without any
-// network access.
+// This package is pure and dependency-free apart from the neutral source result
+// type, so the scoring and the auto-vs-review decision are fully unit-testable
+// without any network access and work identically for every provider.
 package autotag
 
 import (
@@ -18,7 +18,7 @@ import (
 	"strings"
 	"unicode"
 
-	"doujin/internal/nhentai"
+	"doujin/internal/source"
 )
 
 // Tuning constants for the qualify/merge/decide model. A candidate *qualifies* (is
@@ -38,13 +38,13 @@ const (
 	pageBonus            = 0.5  // RANKING ONLY — full when exact, scaled down within tolerance
 )
 
-// Candidate is one scored nhentai search result for a local title. The page and
+// Candidate is one scored provider search result for a local title. The page and
 // language fields feed ranking + display; the auto-vs-review *gate* is a mix of
 // TitleScore, PagesClose/PagesExact, and ArtistMatch (see Decide/qualifies), not the
 // composite Score. ArtistMatch is supplied by the caller (a catalog hit is the artist's
 // by construction); like language it never feeds the ranking Score, only the action.
 type Candidate struct {
-	Gallery      nhentai.SearchResult
+	Gallery      source.SearchResult
 	TitleScore   float64 // max similarity vs the english/japanese online titles, [0,1]
 	MatchTokens  int     // token count of the shorter side of the best-scoring title pair
 	PageDelta    int     // |localPages - gallery pages|; -1 when either count is unknown
@@ -96,7 +96,7 @@ func englishFamily(s string) bool { return s == "english" || s == "translated" }
 // half of a "romaji | english" online title without the romaji half — or a leading
 // event/magazine — diluting the score. The page and language terms feed the ranking
 // Score (which picks the primary among equally-good titles); they are not the auto gate.
-func Score(titleVariants []string, localPages int, localLang, candLang string, artistMatch bool, c nhentai.SearchResult) Candidate {
+func Score(titleVariants []string, localPages int, localLang, candLang string, artistMatch bool, c source.SearchResult) Candidate {
 	ts := 0.0
 	tokens := 0
 	candParts := append(titleParts(c.EnglishTitle), titleParts(c.JapaneseTitle)...)
@@ -144,7 +144,7 @@ func Score(titleVariants []string, localPages int, localLang, candLang string, a
 // result's language (the app injects doujin.DetectLanguage over its titles) and
 // artistMatch reports whether the result is by the local artist (the app marks catalog
 // hits true by construction); a nil resolver means "unknown"/false for every candidate.
-func ScoreAll(titleVariants []string, localPages int, localLang string, results []nhentai.SearchResult, candLang func(nhentai.SearchResult) string, artistMatch func(nhentai.SearchResult) bool) []Candidate {
+func ScoreAll(titleVariants []string, localPages int, localLang string, results []source.SearchResult, candLang func(source.SearchResult) string, artistMatch func(source.SearchResult) bool) []Candidate {
 	out := make([]Candidate, 0, len(results))
 	for _, r := range results {
 		cl := ""

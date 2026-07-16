@@ -25,13 +25,20 @@ type Manga struct {
 	DateAdded    string  `json:"date_added"`
 	DateModified string  `json:"date_modified"`
 	Missing      bool    `json:"missing"`
-	// NhentaiGalleryID is the nhentai gallery a title's tags were copied from, or nil
-	// if it was never auto-tagged. Lets the UI show / re-sync the linked source.
+	// NhentaiGalleryID is the legacy nhentai gallery a title's tags were copied from, or
+	// nil if it was never auto-tagged by nhentai. Kept for backward compatibility;
+	// SourceSlug/SourceRef are the provider-neutral link the auto-tagger now writes.
 	NhentaiGalleryID *int64 `json:"nhentai_gallery_id"`
 	// DisplayTitle is a user-edited title override, or nil when none is set. The UI shows
 	// it instead of Title; Title stays the canonical, matching/Rescan-owned value.
 	DisplayTitle *string `json:"display_title"`
-	AuthorName   string  `json:"author_name"`
+	// SourceSlug names which metadata source a title's tags were copied from ("nhentai",
+	// "mangadex", …), and SourceRef is that source's own gallery id (string). Both nil
+	// when the title was never auto-tagged. Lets the UI show / re-sync the linked source
+	// across providers.
+	SourceSlug *string `json:"source_slug"`
+	SourceRef  *string `json:"source_ref"`
+	AuthorName string  `json:"author_name"`
 }
 
 // Author is an author row.
@@ -79,13 +86,15 @@ func scanMangaRows(rows *sql.Rows) ([]Manga, error) {
 		var cover sql.NullString
 		var missing int
 		var nhentaiID sql.NullInt64
-		var displayTitle sql.NullString
+		var displayTitle, sourceSlug, sourceRef sql.NullString
 		// Column order matches `SELECT m.*, a.name AS author_name` (manga columns in
-		// table-definition order — nhentai_gallery_id was appended by migration 003 and
-		// display_title by migration 006 — then the appended author_name).
+		// table-definition order — nhentai_gallery_id was appended by migration 003,
+		// display_title by 006, and source_slug/source_ref by 007 — then the appended
+		// author_name). Appending a manga column REQUIRES adding its scan target here.
 		if err := rows.Scan(
 			&m.ID, &m.Title, &m.AuthorID, &m.FolderPath, &cover, &m.PageCount,
-			&m.DateAdded, &m.DateModified, &missing, &nhentaiID, &displayTitle, &m.AuthorName,
+			&m.DateAdded, &m.DateModified, &missing, &nhentaiID, &displayTitle,
+			&sourceSlug, &sourceRef, &m.AuthorName,
 		); err != nil {
 			return nil, err
 		}
@@ -100,6 +109,14 @@ func scanMangaRows(rows *sql.Rows) ([]Manga, error) {
 		if displayTitle.Valid {
 			dt := displayTitle.String
 			m.DisplayTitle = &dt
+		}
+		if sourceSlug.Valid {
+			s := sourceSlug.String
+			m.SourceSlug = &s
+		}
+		if sourceRef.Valid {
+			r := sourceRef.String
+			m.SourceRef = &r
 		}
 		m.Missing = missing != 0
 		out = append(out, m)

@@ -6,12 +6,12 @@ export function AddLibraryRoot() {
   return window['go']['main']['App']['AddLibraryRoot']();
 }
 
-export function ApplyNhentaiMerge(arg1, arg2) {
-  return window['go']['main']['App']['ApplyNhentaiMerge'](arg1, arg2);
+export function ApplySourceMerge(arg1, arg2) {
+  return window['go']['main']['App']['ApplySourceMerge'](arg1, arg2);
 }
 
-export function ApplyNhentaiTags(arg1, arg2) {
-  return window['go']['main']['App']['ApplyNhentaiTags'](arg1, arg2);
+export function ApplySourceTags(arg1, arg2) {
+  return window['go']['main']['App']['ApplySourceTags'](arg1, arg2);
 }
 
 export function CancelAutoTag() {
@@ -46,6 +46,10 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetSources() {
+  return window['go']['main']['App']['GetSources']();
+}
+
 export function GetUnimported() {
   return window['go']['main']['App']['GetUnimported']();
 }
@@ -58,8 +62,8 @@ export function Ingest(arg1, arg2) {
   return window['go']['main']['App']['Ingest'](arg1, arg2);
 }
 
-export function MatchNhentai(arg1) {
-  return window['go']['main']['App']['MatchNhentai'](arg1);
+export function MatchSource(arg1) {
+  return window['go']['main']['App']['MatchSource'](arg1);
 }
 
 export function RemoveLibraryRoot(arg1) {
@@ -78,12 +82,20 @@ export function Search(arg1) {
   return window['go']['main']['App']['Search'](arg1);
 }
 
+export function SetActiveSource(arg1) {
+  return window['go']['main']['App']['SetActiveSource'](arg1);
+}
+
 export function SetDisplayTitle(arg1, arg2) {
   return window['go']['main']['App']['SetDisplayTitle'](arg1, arg2);
 }
 
 export function SetNhentaiKey(arg1) {
   return window['go']['main']['App']['SetNhentaiKey'](arg1);
+}
+
+export function SetSourceConfig(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SetSourceConfig'](arg1, arg2, arg3, arg4);
 }
 
 export function StartAutoTag(arg1) {

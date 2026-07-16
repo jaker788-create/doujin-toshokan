@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"doujin/internal/autotag"
 	"doujin/internal/ingest"
-	"doujin/internal/nhentai"
 	"doujin/internal/scanner"
 	"doujin/internal/search"
+	"doujin/internal/source"
 	"doujin/internal/store"
 	"doujin/internal/tag"
 )
@@ -58,7 +59,7 @@ func newTestApp(t *testing.T) *App {
 }
 
 func TestGalleryTypedTagsMapSubjectsNormalizeAndSort(t *testing.T) {
-	d := &nhentai.GalleryDetail{Tags: []nhentai.Tag{
+	d := &source.GalleryDetail{Tags: []tag.Typed{
 		{Type: "category", Name: "Doujinshi"},
 		{Type: "parody", Name: "Naruto"},
 		{Type: "tag", Name: "  Compilation "},
@@ -94,13 +95,13 @@ func TestApplyTagsUnionsExistingAndStampsGallery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	detail := &nhentai.GalleryDetail{ID: 999, Tags: []nhentai.Tag{
+	detail := &source.GalleryDetail{ID: "999", Tags: []tag.Typed{
 		{Type: "tag", Name: "shared"},    // overlaps an existing tag
 		{Type: "tag", Name: "new-one"},   // new
 		{Type: "parody", Name: "Naruto"}, // new, normalized to lowercase
 	}}
 
-	saved, err := a.applyTags(id, 999, []*nhentai.GalleryDetail{detail})
+	saved, err := a.applyTags(id, "nhentai", "999", []*source.GalleryDetail{detail})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +137,11 @@ func TestApplyTagsPreservesExistingLanguage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &nhentai.GalleryDetail{ID: 1, Tags: []nhentai.Tag{
+	d := &source.GalleryDetail{ID: "1", Tags: []tag.Typed{
 		{Type: "language", Name: "japanese"},
 		{Type: "tag", Name: "newtag"},
 	}}
-	saved, err := a.applyTags(id, 1, []*nhentai.GalleryDetail{d})
+	saved, err := a.applyTags(id, "nhentai", "1", []*source.GalleryDetail{d})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,13 +168,13 @@ func TestApplyTagsAdoptsOnlyPrimaryLanguageWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	primary := &nhentai.GalleryDetail{ID: 1, Tags: []nhentai.Tag{
+	primary := &source.GalleryDetail{ID: "1", Tags: []tag.Typed{
 		{Type: "language", Name: "english"}, {Type: "tag", Name: "aaa"},
 	}}
-	secondary := &nhentai.GalleryDetail{ID: 2, Tags: []nhentai.Tag{
+	secondary := &source.GalleryDetail{ID: "2", Tags: []tag.Typed{
 		{Type: "language", Name: "chinese"}, {Type: "tag", Name: "bbb"},
 	}}
-	saved, err := a.applyTags(id, 1, []*nhentai.GalleryDetail{primary, secondary})
+	saved, err := a.applyTags(id, "nhentai", "1", []*source.GalleryDetail{primary, secondary})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,9 +194,9 @@ func TestApplyTagsAdoptsOnlyPrimaryLanguageWhenEmpty(t *testing.T) {
 
 func TestToCandidatePopulatesCoverLangAndURL(t *testing.T) {
 	c := autotag.Candidate{
-		Gallery: nhentai.SearchResult{
-			ID: 42, MediaID: "777", Thumbnail: "https://t.nhentai.net/galleries/777/thumb.webp",
-			EnglishTitle: "X", NumPages: 20, NumFavorites: 3,
+		Gallery: source.SearchResult{
+			ID: "42", MediaID: "777", Thumbnail: "https://t.nhentai.net/galleries/777/thumb.webp",
+			GalleryURL: "https://nhentai.net/g/42/", EnglishTitle: "X", NumPages: 20, NumFavorites: 3,
 		},
 		TitleScore: 0.9, PagesExact: true, PageDelta: 0, Lang: "english", LangMatch: true,
 	}
@@ -214,8 +215,8 @@ func TestToCandidatePopulatesCoverLangAndURL(t *testing.T) {
 func TestShortlistFlagsArtistAndParodyOverlap(t *testing.T) {
 	mi := matchInputs("/lib/[Group (Sanada)] T (Kemono Jihen) [English]", "T", "")
 	ranked := []autotag.Candidate{
-		{Gallery: nhentai.SearchResult{ID: 1, EnglishTitle: "[Group (Sanada)] Whatever (Kemono Jihen) [English]"}},
-		{Gallery: nhentai.SearchResult{ID: 2, EnglishTitle: "[Other (Someone)] Whatever (Naruto)"}},
+		{Gallery: source.SearchResult{ID: "1", EnglishTitle: "[Group (Sanada)] Whatever (Kemono Jihen) [English]"}},
+		{Gallery: source.SearchResult{ID: "2", EnglishTitle: "[Other (Someone)] Whatever (Naruto)"}},
 	}
 	out := shortlist(ranked, 8, mi)
 	if !out[0].ArtistMatch || !out[0].ParodyMatch {
@@ -304,12 +305,12 @@ func TestFirstTitleWordSkipsShortWords(t *testing.T) {
 // The early stop must not fire on a same-titled, same-page work by a different artist
 // when we know the local artist; the right-artist candidate must satisfy it.
 func TestConfidentMatchRequiresArtistWhenKnown(t *testing.T) {
-	score := func(r nhentai.SearchResult) []autotag.Candidate {
-		am := func(x nhentai.SearchResult) bool { return candidateArtistMatches(x, "some artist") }
-		return autotag.ScoreAll([]string{"A Little Sister's Warmth"}, 19, "", []nhentai.SearchResult{r}, nil, am)
+	score := func(r source.SearchResult) []autotag.Candidate {
+		am := func(x source.SearchResult) bool { return candidateArtistMatches(x, "some artist") }
+		return autotag.ScoreAll([]string{"A Little Sister's Warmth"}, 19, "", []source.SearchResult{r}, nil, am)
 	}
-	right := nhentai.SearchResult{ID: 1, EnglishTitle: "[Some Artist] A Little Sister's Warmth", NumPages: 19}
-	wrong := nhentai.SearchResult{ID: 2, EnglishTitle: "[Other Artist] A Little Sister's Warmth", NumPages: 19}
+	right := source.SearchResult{ID: "1", EnglishTitle: "[Some Artist] A Little Sister's Warmth", NumPages: 19}
+	wrong := source.SearchResult{ID: "2", EnglishTitle: "[Other Artist] A Little Sister's Warmth", NumPages: 19}
 	if confidentMatch(score(wrong), "some artist") {
 		t.Error("wrong-artist candidate should not be a confident match")
 	}
@@ -345,16 +346,16 @@ func TestMatchInputsCleansWrappedArtist(t *testing.T) {
 
 func TestReviewPoolPrefersArtistMatches(t *testing.T) {
 	ranked := []autotag.Candidate{
-		{Gallery: nhentai.SearchResult{ID: 1}, ArtistMatch: false},
-		{Gallery: nhentai.SearchResult{ID: 2}, ArtistMatch: true},
-		{Gallery: nhentai.SearchResult{ID: 3}, ArtistMatch: true},
+		{Gallery: source.SearchResult{ID: "1"}, ArtistMatch: false},
+		{Gallery: source.SearchResult{ID: "2"}, ArtistMatch: true},
+		{Gallery: source.SearchResult{ID: "3"}, ArtistMatch: true},
 	}
-	if got := applyGalleryIDs(reviewPool(ranked)); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+	if got := applyGalleryIDs(reviewPool(ranked)); len(got) != 2 || got[0] != "2" || got[1] != "3" {
 		t.Errorf("pool = %v, want the artist-matched [2 3] in order", got)
 	}
 	// No artist matches -> fall back to the full ranked list.
-	none := []autotag.Candidate{{Gallery: nhentai.SearchResult{ID: 9}}}
-	if got := applyGalleryIDs(reviewPool(none)); len(got) != 1 || got[0] != 9 {
+	none := []autotag.Candidate{{Gallery: source.SearchResult{ID: "9"}}}
+	if got := applyGalleryIDs(reviewPool(none)); len(got) != 1 || got[0] != "9" {
 		t.Errorf("fallback pool = %v, want the full list [9]", got)
 	}
 }
@@ -381,9 +382,9 @@ func TestGatherCandidatesCleanArtistHitsCatalog(t *testing.T) {
 // Forced-english prefers the language-narrowed catalog (keeping a prolific artist under the
 // page cap); when it has results the all-language catalog is never fetched.
 func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
-	cs := &stubSearcher{hits: map[string][]nhentai.SearchResult{
-		`artist:"x" language:english`: {{ID: 6, EnglishTitle: "[Circle] EN Work"}},
-		`artist:"x"`:                  {{ID: 7}}, // the all-language fallback — must stay unused
+	cs := &stubSearcher{hits: map[string][]source.SearchResult{
+		`artist:"x" language:english`: {{ID: "6", EnglishTitle: "[Circle] EN Work"}},
+		`artist:"x"`:                  {{ID: "7"}}, // the all-language fallback — must stay unused
 	}}
 	run := newAutoTagRun(cs, "english", map[string]int{"x": 2})
 	app := &App{}
@@ -397,7 +398,7 @@ func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
 			t.Errorf("all-language catalog fetched despite the narrowed one having results")
 		}
 	}
-	if len(cands) != 1 || cands[0].Gallery.ID != 6 {
+	if len(cands) != 1 || cands[0].Gallery.ID != "6" {
 		t.Errorf("want only the language-narrowed gallery 6, got %+v", cands)
 	}
 }
@@ -405,8 +406,8 @@ func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
 // When the language-narrowed catalog is empty (a Japanese-only artist under forced-english),
 // it falls back to the all-language catalog and finds the works (flagged artist-matched).
 func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
-	cs := &stubSearcher{hits: map[string][]nhentai.SearchResult{
-		`artist:"x"`: {{ID: 5, EnglishTitle: "[Circle] JP-only Work"}},
+	cs := &stubSearcher{hits: map[string][]source.SearchResult{
+		`artist:"x"`: {{ID: "5", EnglishTitle: "[Circle] JP-only Work"}},
 		// no `artist:"x" language:english` entry -> the narrowed query returns nothing
 	}}
 	run := newAutoTagRun(cs, "english", map[string]int{"x": 2})
@@ -418,7 +419,7 @@ func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
 	}
 	found := false
 	for _, c := range cands {
-		if c.Gallery.ID == 5 && c.ArtistMatch {
+		if c.Gallery.ID == "5" && c.ArtistMatch {
 			found = true
 		}
 	}
@@ -435,29 +436,31 @@ func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
 // and dedup paths are exercised.
 type countingSearcher struct {
 	searchCalls []string
-	detailCalls []int64
+	detailCalls []string
 	numPages    int
 	perPage     int
 }
 
-func (c *countingSearcher) Search(_ context.Context, query string, page int) (*nhentai.SearchResponse, error) {
+func (c *countingSearcher) Slug() string { return "nhentai" }
+
+func (c *countingSearcher) Search(_ context.Context, query string, page int) (*source.SearchResponse, error) {
 	c.searchCalls = append(c.searchCalls, fmt.Sprintf("%s#%d", query, page))
 	np := c.numPages
 	if np < 1 {
 		np = 1
 	}
-	var res []nhentai.SearchResult
+	var res []source.SearchResult
 	if page <= np {
 		for i := 0; i < c.perPage; i++ {
-			res = append(res, nhentai.SearchResult{ID: int64(page*1000 + i)})
+			res = append(res, source.SearchResult{ID: strconv.Itoa(page*1000 + i)})
 		}
 	}
-	return &nhentai.SearchResponse{Result: res, NumPages: np, PerPage: c.perPage, Total: np * c.perPage}, nil
+	return &source.SearchResponse{Result: res, NumPages: np, Total: np * c.perPage}, nil
 }
 
-func (c *countingSearcher) GalleryByID(_ context.Context, id int64) (*nhentai.GalleryDetail, error) {
+func (c *countingSearcher) GalleryByID(_ context.Context, id string) (*source.GalleryDetail, error) {
 	c.detailCalls = append(c.detailCalls, id)
-	return &nhentai.GalleryDetail{ID: id}, nil
+	return &source.GalleryDetail{ID: id}, nil
 }
 
 func countQueries(calls []string, prefix string) int {
@@ -531,7 +534,7 @@ func TestSearchPageAndDetailCached(t *testing.T) {
 		t.Errorf("searchPage made %d calls for the same query+page, want 1 (cached)", len(cs.searchCalls))
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := run.detail(ctx, 42); err != nil {
+		if _, err := run.detail(ctx, "42"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -606,18 +609,20 @@ func TestGatherSingletonFlagsArtistQueryResults(t *testing.T) {
 // records every query, so a test can model "this exact tag/language returns nothing, that
 // one returns the works" and assert which queries ran.
 type stubSearcher struct {
-	hits  map[string][]nhentai.SearchResult
+	hits  map[string][]source.SearchResult
 	calls []string
 }
 
-func (s *stubSearcher) Search(_ context.Context, query string, _ int) (*nhentai.SearchResponse, error) {
+func (s *stubSearcher) Slug() string { return "nhentai" }
+
+func (s *stubSearcher) Search(_ context.Context, query string, _ int) (*source.SearchResponse, error) {
 	s.calls = append(s.calls, query)
 	res := s.hits[query]
-	return &nhentai.SearchResponse{Result: res, NumPages: 1, PerPage: len(res)}, nil
+	return &source.SearchResponse{Result: res, NumPages: 1}, nil
 }
 
-func (s *stubSearcher) GalleryByID(_ context.Context, id int64) (*nhentai.GalleryDetail, error) {
-	return &nhentai.GalleryDetail{ID: id}, nil
+func (s *stubSearcher) GalleryByID(_ context.Context, id string) (*source.GalleryDetail, error) {
+	return &source.GalleryDetail{ID: id}, nil
 }
 
 func TestArtistTagVariants(t *testing.T) {
@@ -634,8 +639,8 @@ func TestArtistTagVariants(t *testing.T) {
 // A punctuated artist whose exact tag ("50% off") has no nhentai match falls back to the
 // word form ("50 percent off"), and those results are flagged artist-matched.
 func TestGatherCatalogNormalizedArtistFallback(t *testing.T) {
-	cs := &stubSearcher{hits: map[string][]nhentai.SearchResult{
-		`artist:"50 percent off"`: {{ID: 7, EnglishTitle: "[50% OFF] Best Friend"}},
+	cs := &stubSearcher{hits: map[string][]source.SearchResult{
+		`artist:"50 percent off"`: {{ID: "7", EnglishTitle: "[50% OFF] Best Friend"}},
 	}}
 	run := newAutoTagRun(cs, "auto", map[string]int{"50% off": 2})
 	app := &App{}
@@ -646,7 +651,7 @@ func TestGatherCatalogNormalizedArtistFallback(t *testing.T) {
 	}
 	found := false
 	for _, c := range cands {
-		if c.Gallery.ID == 7 && c.ArtistMatch {
+		if c.Gallery.ID == "7" && c.ArtistMatch {
 			found = true
 		}
 	}

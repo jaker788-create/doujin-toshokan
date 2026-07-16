@@ -71,7 +71,7 @@ func TestSearchDecodesAndSetsHeaders(t *testing.T) {
 		t.Fatalf("got %d results, want 1", len(resp.Result))
 	}
 	g := resp.Result[0]
-	if g.ID != 653427 || g.NumPages != 50 || g.EnglishTitle == "" {
+	if g.ID != "653427" || g.NumPages != 50 || g.EnglishTitle == "" {
 		t.Errorf("decoded result wrong: %+v", g)
 	}
 	// The cover identifiers must decode so the review UI can show a thumbnail.
@@ -81,8 +81,10 @@ func TestSearchDecodesAndSetsHeaders(t *testing.T) {
 	if g.Thumbnail != "https://t.nhentai.net/galleries/123/thumb.jpg" {
 		t.Errorf("thumbnail = %q", g.Thumbnail)
 	}
-	if len(g.TagIDs) != 2 {
-		t.Errorf("tag_ids = %v, want 2 ids", g.TagIDs)
+	// The provider builds an absolute gallery URL (search returns tag ids only, so no
+	// tag names come back on a list item).
+	if g.GalleryURL != "https://nhentai.net/g/653427/" {
+		t.Errorf("gallery_url = %q", g.GalleryURL)
 	}
 }
 
@@ -95,16 +97,18 @@ func TestGalleryByIDDecodesTypedTags(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := testClient(srv).GalleryByID(context.Background(), 653427)
+	d, err := testClient(srv).GalleryByID(context.Background(), "653427")
 	if err != nil {
 		t.Fatalf("GalleryByID: %v", err)
 	}
-	if d.Title.English != "Karakishi Youhei-dan Compilation" {
-		t.Errorf("english title = %q", d.Title.English)
+	if d.EnglishTitle != "Karakishi Youhei-dan Compilation" {
+		t.Errorf("english title = %q", d.EnglishTitle)
 	}
 	if len(d.Tags) != 3 {
 		t.Fatalf("got %d tags, want 3", len(d.Tags))
 	}
+	// Tags arrive already mapped onto our subject vocabulary (nhentai's "parody" type
+	// normalizes to tag.Parody, which is the same "parody" string).
 	if d.Tags[1].Type != "parody" || d.Tags[1].Name != "naruto" {
 		t.Errorf("tag[1] = %+v, want parody/naruto", d.Tags[1])
 	}
