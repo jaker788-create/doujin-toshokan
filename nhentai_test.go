@@ -366,6 +366,24 @@ func TestMatchInputsCleansWrappedArtist(t *testing.T) {
 	}
 }
 
+func TestMatchInputsPeelsSourcePrefix(t *testing.T) {
+	// A "<slug>-<ref>" folder prefix is peeled into the (slug, ref) shortcut pair, for each
+	// registered provider's id shape (nhentai numeric, mangadex UUID); an ordinary folder
+	// leaves both empty so the shortcut never fires.
+	const uuid = "550e8400-e29b-41d4-a716-446655440000"
+	cases := []struct{ folder, wantSlug, wantRef string }{
+		{"/lib/nhentai-271687 - [A] Title", "nhentai", "271687"},
+		{"/lib/mangadex-" + uuid + " - Title", "mangadex", uuid},
+		{"/lib/[A] Ordinary Title", "", ""},
+	}
+	for _, c := range cases {
+		mi := matchInputs(c.folder, "Title", "")
+		if mi.sourceSlug != c.wantSlug || mi.sourceRef != c.wantRef {
+			t.Errorf("matchInputs(%q) source = (%q,%q), want (%q,%q)", c.folder, mi.sourceSlug, mi.sourceRef, c.wantSlug, c.wantRef)
+		}
+	}
+}
+
 func TestReviewPoolPrefersArtistMatches(t *testing.T) {
 	ranked := []autotag.Candidate{
 		{Gallery: source.SearchResult{ID: "1"}, ArtistMatch: false},

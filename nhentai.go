@@ -61,12 +61,13 @@ const strongTitleScore = 0.6
 // candidates). The folder *basename* is parsed — not the cleaned stored title — so
 // these survive title cleaning, exactly as Rescan re-derives them.
 type matchInput struct {
-	variants  []string
-	anchors   []string
-	lang      string          // local language ("" when the folder name implies none)
-	artist    string          // lowercased local artist/author, for overlap flags
-	parodies  map[string]bool // lowercased local parody set, for overlap flags
-	galleryID int64           // exact gallery id from the name (0 if none) — a direct-lookup shortcut
+	variants   []string
+	anchors    []string
+	lang       string          // local language ("" when the folder name implies none)
+	artist     string          // lowercased local artist/author, for overlap flags
+	parodies   map[string]bool // lowercased local parody set, for overlap flags
+	sourceSlug string          // provider slug from the folder name ("" if none) — gates the shortcut
+	sourceRef  string          // provider gallery ref from the folder name ("" if none) — a direct-lookup shortcut
 }
 
 // matchInputs parses the folder basename into a matchInput. The stored author (from
@@ -74,15 +75,16 @@ type matchInput struct {
 // taken from the [Circle (Artist)] in the name.
 func matchInputs(folderPath, fallbackTitle, authorName string) matchInput {
 	// TitleNameFor strips a .cbz/.zip extension for an archive title so its name parses
-	// the same as a folder's; ParseName also peels a "nhentai-<id>" prefix and exposes
-	// the gallery id, which becomes a direct-lookup shortcut below.
+	// the same as a folder's; ParseName also peels a "<slug>-<ref>" prefix and exposes
+	// the provider slug + gallery ref, which become a direct-lookup shortcut below.
 	p := doujin.ParseName(scanner.TitleNameFor(folderPath))
 	mi := matchInput{
-		variants:  p.TitleVariants(),
-		anchors:   p.Anchors(),
-		lang:      p.Language,
-		parodies:  map[string]bool{},
-		galleryID: p.GalleryID,
+		variants:   p.TitleVariants(),
+		anchors:    p.Anchors(),
+		lang:       p.Language,
+		parodies:   map[string]bool{},
+		sourceSlug: p.SourceSlug,
+		sourceRef:  p.SourceRef,
 	}
 	if len(mi.variants) == 0 {
 		mi.variants = []string{fallbackTitle}
@@ -649,11 +651,13 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 	// full catalog page-through for one title), with Auto language narrowing.
 	run := newAutoTagRun(client, "auto", nil)
 
-	// Shortcut: an exact gallery id embedded in the folder name is authoritative —
-	// fetch that one gallery and present it as a confident match, skipping the fuzzy
-	// search entirely. A bad/stale id (fetch error, e.g. 404) falls through to search.
-	if mi.galleryID != 0 {
-		if d, derr := run.detail(a.ctx, strconv.FormatInt(mi.galleryID, 10)); derr == nil {
+	// Shortcut: an exact gallery ref embedded in the folder name is authoritative — fetch
+	// that one gallery and present it as a confident match, skipping the fuzzy search
+	// entirely. Only fires when the folder's provider is the active one (we can only query
+	// the active provider); a mismatch or a bad/stale ref (fetch error, e.g. 404) falls
+	// through to search.
+	if mi.sourceRef != "" && mi.sourceSlug == run.slug {
+		if d, derr := run.detail(a.ctx, mi.sourceRef); derr == nil {
 			localTags, _ := search.GetMangaTagsTyped(a.db, id)
 			return &MatchResult{
 				MangaID:         id,
@@ -1147,12 +1151,13 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 			localLang = a.localLanguageTag(t.id)
 		}
 
-		// Shortcut: an exact gallery id in the folder name is authoritative — fetch that
+		// Shortcut: an exact gallery ref in the folder name is authoritative — fetch that
 		// one gallery and auto-apply its tags, skipping the multi-query search (cheaper and
-		// exact). A cancellation aborts the run; any other fetch error (e.g. a stale id)
-		// falls through to the normal search below.
-		if mi.galleryID != 0 {
-			if d, derr := run.detail(ctx, strconv.FormatInt(mi.galleryID, 10)); derr == nil {
+		// exact). Only fires when the folder's provider is the active one. A cancellation
+		// aborts the run; a mismatch or any other fetch error (e.g. a stale ref) falls
+		// through to the normal search below.
+		if mi.sourceRef != "" && mi.sourceSlug == run.slug {
+			if d, derr := run.detail(ctx, mi.sourceRef); derr == nil {
 				if _, aerr := a.applyTags(t.id, run.slug, d.ID, []*source.GalleryDetail{d}); aerr != nil {
 					prog.Outcome, prog.Detail = "error", aerr.Error()
 					a.emit(prog)
