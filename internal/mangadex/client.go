@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ const (
 
 	requestTimeout = 20 * time.Second
 	searchLimit    = 25
+	maxRetries     = 3
 )
 
 // contentRatings requests all ratings including adult content, which MangaDex omits by
@@ -349,31 +351,52 @@ func parseQuery(raw string) (text, lang string) {
 
 // ── transport ──────────────────────────────────────────────────────────────
 
-// do performs a throttled GET against base+path and decodes the JSON body into out.
+// do performs a throttled GET against base+path and decodes the JSON body into out. It
+// retries on 429 (respecting Retry-After) up to maxRetries, and aborts promptly if ctx is
+// cancelled (used by the bulk sweep's Cancel button). MangaDex returns 429 under load.
 func (c *Client) do(ctx context.Context, path string, out any) error {
-	if err := c.throttle(ctx); err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Accept", "application/json")
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if err := c.throttle(ctx); err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", c.userAgent)
+		req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			wait := parseRetryAfter(resp.Header.Get("Retry-After"))
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("mangadex: rate limited (429) on %s", path)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			_ = resp.Body.Close()
+			return fmt.Errorf("mangadex: %s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		err = json.NewDecoder(resp.Body).Decode(out)
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("mangadex: decoding %s: %w", path, err)
+		}
+		return nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("mangadex: %s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("mangadex: decoding %s: %w", path, err)
-	}
-	return nil
+	return lastErr
 }
 
 // throttle blocks until at least c.interval has elapsed since the previous request, or
@@ -392,4 +415,16 @@ func (c *Client) throttle(ctx context.Context) error {
 	}
 	c.lastReq = time.Now()
 	return nil
+}
+
+// parseRetryAfter reads a Retry-After header expressed in seconds, clamped to a sane
+// window. Missing or unparseable values fall back to 5s.
+func parseRetryAfter(h string) time.Duration {
+	if secs, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && secs > 0 {
+		if secs > 60 {
+			secs = 60
+		}
+		return time.Duration(secs) * time.Second
+	}
+	return 5 * time.Second
 }

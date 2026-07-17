@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,5 +165,33 @@ func TestSearchMapsResults(t *testing.T) {
 	}
 	if subjects["masashi kishimoto"] != tag.Artist || subjects["action"] != tag.Tag {
 		t.Errorf("mapped tags wrong: %+v", g.Tags)
+	}
+}
+
+// A 429 (which MangaDex returns under load) must be retried honoring Retry-After, not
+// failed outright — the same contract nhentai's client already meets.
+func TestRetriesOn429ThenSucceeds(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Retry-After", "1") // shortest realistic backoff -> ~1s
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(searchBody))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	resp, err := testClient(srv).Search(ctx, "naruto", 1)
+	if err != nil {
+		t.Fatalf("Search after 429: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Errorf("total = %d, want 1", resp.Total)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Errorf("server called %d times, want 2 (429 then 200)", calls)
 	}
 }
