@@ -21,8 +21,11 @@ gives the app's auto-tagger an exact match.
 
 The cbz also embeds an `info.json` with the **full** scraped tag set (including
 `male:`/`female:`/`other:` namespaced tags the filename can't carry), keyed by
-the app's tag subjects — a lossless record for a future ingest feature. Until
-then, run the app's nhentai auto-tagger for characters/general tags.
+the app's tag subjects. On import (and on rescan), Doujin Toshokan reads this
+`info.json` and applies every subject — artist, group, parody, character,
+category, language, and the general tags — additively, so characters and general
+tags come in without needing the nhentai auto-tagger. A `.cbz` with no
+`info.json` still imports fine, tagged from the filename alone.
 
 ### Install
 
