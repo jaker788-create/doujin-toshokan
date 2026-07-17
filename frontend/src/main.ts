@@ -164,7 +164,11 @@ function setReaderFitWidth(on: boolean): void {
 // WebView2 loads nhentai's public CDN directly, so candidate covers are plain remote
 // <img>s — no proxy. The cover's real extension isn't in the API, so wireCover walks
 // the candidates (absolute thumbnail first, then jpg/webp/png/gif from media_id) on
-// each load error and gives up to a neutral tile.
+// each load error and gives up to a neutral tile. NOTE: the media_id reconstruction is
+// load-bearing, not dead weight — a detail-fetched candidate (the nhentai-<id> folder-id
+// shortcut → galleryIDCandidate) comes from a source.GalleryDetail, which has no thumbnail
+// field, so media_id is its ONLY cover source. Don't drop it unless GalleryDetail grows a
+// server-built cover URL (see MULTI_SOURCE_ROADMAP.md §3.5).
 const COVER_EXTS = ['jpg', 'webp', 'png', 'gif'];
 function coverCandidates(c: main.SourceCandidate): string[] {
     const srcs: string[] = [];
