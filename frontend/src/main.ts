@@ -160,18 +160,30 @@ function setReaderFitWidth(on: boolean): void {
     lsSet('reader.fitWidth', on ? '1' : '0');
 }
 
-// ───── candidate cover (remote) ───────────────────────────────────
-// WebView2 loads each provider's public CDN directly, so candidate covers are plain
-// remote <img>s — no proxy. Every provider supplies an absolute thumbnail URL, so we set
-// it directly and fall back to a neutral tile if it's absent or fails to load.
-function wireCover(img: HTMLImageElement, c: main.SourceCandidate): void {
-    const missing = () => { img.classList.add('nh-cover-missing'); img.removeAttribute('src'); };
-    if (c.thumbnail && /^https?:\/\//.test(c.thumbnail)) {
-        img.addEventListener('error', missing, { once: true }); // attached before src, so a failed load still fires
-        img.src = c.thumbnail;
-    } else {
-        missing();
+// ───── nhentai cover (remote) ─────────────────────────────────────
+// WebView2 loads nhentai's public CDN directly, so candidate covers are plain remote
+// <img>s — no proxy. The cover's real extension isn't in the API, so wireCover walks
+// the candidates (absolute thumbnail first, then jpg/webp/png/gif from media_id) on
+// each load error and gives up to a neutral tile.
+const COVER_EXTS = ['jpg', 'webp', 'png', 'gif'];
+function coverCandidates(c: main.SourceCandidate): string[] {
+    const srcs: string[] = [];
+    if (c.thumbnail && /^https?:\/\//.test(c.thumbnail)) srcs.push(c.thumbnail);
+    if (c.media_id) {
+        const id = encodeURIComponent(c.media_id);
+        for (const ext of COVER_EXTS) srcs.push(`https://t.nhentai.net/galleries/${id}/thumb.${ext}`);
     }
+    return srcs;
+}
+function wireCover(img: HTMLImageElement, c: main.SourceCandidate): void {
+    const srcs = coverCandidates(c);
+    let i = 0;
+    const next = () => {
+        if (i >= srcs.length) { img.classList.add('nh-cover-missing'); img.removeAttribute('src'); return; }
+        img.src = srcs[i++];
+    };
+    img.addEventListener('error', next);
+    next(); // listener attached first, so a failed first src advances correctly
 }
 
 // renderMatchBadges turns a candidate's scoring signals into compact "why-match"
