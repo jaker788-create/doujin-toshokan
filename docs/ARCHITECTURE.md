@@ -126,6 +126,20 @@ open `*sql.Rows` and issue an `Exec` on the same DB — both need the one connec
 and would deadlock. Read all rows into a slice and close the cursor *before*
 writing. `App.Rescan` does exactly this; follow the pattern.
 
+### 10. Tag fetching goes through `source.Provider`
+
+Every path that copies tags from an online source — the interactive `MatchSource`,
+the bulk `StartAutoTag` sweep, the manual apply — fetches through the
+`source.Provider` interface (`internal/source`) and scores **neutral** types:
+`source.SearchResult` / `GalleryDetail` and `tag.Typed`, never a site's JSON. Each
+site's quirks (nhentai's int ids + search syntax, mangadex's UUIDs + relationship
+authors) are mapped to the neutral model *inside* its client (`internal/nhentai`,
+`internal/mangadex`); the matcher (`internal/autotag`) and the apply path stay
+site-agnostic. *Why:* adding a source is implementing one interface, not editing the
+matcher. The `manga.source_slug` / `source_ref` link columns (migration 007) record
+which provider a title's tags came from as a `(slug, string-id)` pair — the provider-
+agnostic successor to the legacy `nhentai_gallery_id` they backfill from.
+
 ---
 
 ## Module map
@@ -140,14 +154,19 @@ Backend packages under `internal/`. Each has one responsibility.
 | `thumbs` | `imaging` thumbnail generation + disk cache (atomic, placeholder fallback). |
 | `ingest` | Create/link author, manga row, and tags. `NormalizeTag`, dedupe, transactional. `GetOrCreateTag(name, subject)` enriches a tag's subject (upgrade, **never downgrade**), so re-saving a typed tag by name keeps its subject. |
 | `search` | The read chokepoint: `SearchManga`, suggestions, tag/author/manga lookups (incl. `GetMangaTagsTyped` for the subject-grouped detail view), and the `Manga`/`Author`/`Tag` row types. |
-| `tag` | Leaf vocabulary package: the canonical tag **subjects** (`language`, `artist`, `group`, `parody`, `character`, `category`, `tag`, plus `General`) — the same set nhentai uses — with `Typed{Name,Type}`, `Normalize`, `Label`, `Rank`, `Sort`. Shared by the parser-mapping, ingest, search, and nhentai layers with no import cycle. |
+| `tag` | Leaf vocabulary package: the canonical tag **subjects** (`language`, `artist`, `group`, `parody`, `character`, `category`, `tag`, plus `General`) — the same set nhentai uses — with `Typed{Name,Type}`, `Normalize`, `Label`, `Rank`, `Sort`. Shared by the parser-mapping, ingest, search, and provider layers with no import cycle. |
+| `autotag` | Pure, network-free matcher: scores a local title against a provider's neutral `SearchResult`s (cross-language title similarity, with page + language ranking) and decides auto-apply vs. review. Works identically for every provider. |
+| `source` | Leaf provider-neutral **seam**: the `Provider` interface + neutral `SearchResult`/`GalleryDetail`/`SearchResponse` the matcher scores. IDs are strings; search is best-effort (a detail-only site may return nothing). See invariant 10. |
+| `nhentai` / `mangadex` | The two `source.Provider` implementations — rate-limited HTTP clients that look up galleries and map each site's JSON + tags onto the neutral types and the shared `tag.Subject` vocabulary. Add a source by adding a package here. |
 | `paths` | `IsWithinRoots` path-traversal guard. |
 | `stash` | Saved pages ("tabs"): CRUD over the `stash` table. An entry is a `hash` + `label` + `kind` (`search`\|`title`); title entries `LEFT JOIN manga`/`authors` for card display and own a `last_page` resume position (`ON DELETE CASCADE` with `manga`). Uses the `store.Querier` style. |
 
 Root `main` package: `app.go` (bound methods — the thin API layer that
-validates/clamps input and calls the packages above), `assets.go` (binary file
-handler), `main.go` (Wails wiring). Business logic lives in `internal/`, which
-keeps it unit-testable without a running window.
+validates/clamps input and calls the packages above), `nhentai.go` (the tag-matching
+bound methods that drive `internal/autotag` over a `source.Provider`), `providers.go`
+(the provider registry + source-config bound methods), `assets.go` (binary file
+handler), `main.go` (Wails wiring). Business logic lives in `internal/`, which keeps
+it unit-testable without a running window.
 
 ---
 
@@ -206,6 +225,9 @@ the app opens it with no migration needed.
 - **New way to slice the library?** Extend `search.SearchManga`, don't write a
   parallel query. Keep `sort` allow-listed.
 - **New schema?** Append a migration; add a `store_test.go` test.
+- **New tag source (metadata site)?** Add an `internal/<site>` package implementing
+  `source.Provider` and register it in `providers.go`; the matcher is untouched
+  (invariant 10).
 - **Serving a file by path?** Call `paths.IsWithinRoots` first.
 - **New frontend↔backend call?** Add an exported method on `App` and rebuild
   (`wails build` / `wails generate module`) so the typed bindings regenerate. Don't
