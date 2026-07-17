@@ -29,12 +29,15 @@ import (
 // SearchResult is one gallery in a Search response — the lightweight list item the
 // matcher scores. Tags is usually nil for list items (names cost a detail fetch on
 // most sites); Thumbnail and GalleryURL are absolute URLs the provider builds, so the
-// frontend never reconstructs a per-site CDN path.
+// frontend never reconstructs a per-site CDN path. Language, when a provider can supply
+// it (e.g. MangaDex's originalLanguage mapped onto our tag vocabulary), lets the matcher
+// rank by language without the title-decoration heuristic; "" means unknown.
 type SearchResult struct {
 	ID            string      `json:"id"`
 	MediaID       string      `json:"media_id"`
 	EnglishTitle  string      `json:"english_title"`
 	JapaneseTitle string      `json:"japanese_title"`
+	Language      string      `json:"language"`
 	NumPages      int         `json:"num_pages"`
 	NumFavorites  int         `json:"num_favorites"`
 	Thumbnail     string      `json:"thumbnail"`

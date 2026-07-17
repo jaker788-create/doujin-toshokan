@@ -217,6 +217,7 @@ func mapSearchResult(m mdManga) source.SearchResult {
 		GalleryURL:    titleBaseURL + "/" + m.ID,
 		EnglishTitle:  english,
 		JapaneseTitle: japanese,
+		Language:      langCodeToName[strings.ToLower(m.Attributes.OriginalLanguage)],
 		Tags:          mapTags(m),
 	}
 }

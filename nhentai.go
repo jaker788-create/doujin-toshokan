@@ -102,10 +102,15 @@ func matchInputs(folderPath, fallbackTitle, authorName string) matchInput {
 	return mi
 }
 
-// candLangResolver reads a candidate's language from its own title decorations using
-// the same vocabulary as the local parser — no extra request, so it works in the bulk
-// sweep too. The english title is tried first, then the japanese.
+// candLangResolver reads a candidate's language, preferring a provider-supplied Language
+// (e.g. MangaDex's originalLanguage, which carries no title decoration) and otherwise
+// detecting it from the title decorations using the same vocabulary as the local parser.
+// Either way it needs no extra request, so it works in the bulk sweep too. When falling
+// back to detection the english title is tried first, then the japanese.
 func candLangResolver(r source.SearchResult) string {
+	if r.Language != "" {
+		return r.Language
+	}
 	if l := doujin.DetectLanguage(r.EnglishTitle); l != "" {
 		return l
 	}

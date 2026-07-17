@@ -146,6 +146,11 @@ func TestSearchMapsResults(t *testing.T) {
 	if g.ID != "abc-123" || g.EnglishTitle != "Naruto" || g.JapaneseTitle != "ナルト" {
 		t.Errorf("titles/id wrong: %+v", g)
 	}
+	// originalLanguage "ja" is promoted onto the neutral Language field (in our vocabulary)
+	// so the matcher can rank by language without a title decoration.
+	if g.Language != "japanese" {
+		t.Errorf("language = %q, want japanese", g.Language)
+	}
 	if g.GalleryURL != "https://mangadex.org/title/abc-123" {
 		t.Errorf("gallery url = %q", g.GalleryURL)
 	}

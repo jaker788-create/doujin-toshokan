@@ -44,6 +44,28 @@ func tagTypes(ts []tag.Typed) map[string]string {
 	return m
 }
 
+// candLangResolver prefers a provider-supplied Language (MangaDex) and otherwise falls
+// back to detecting a [language] decoration off the titles (nhentai). The field wins even
+// when a title decoration would say something else, so a provider's own answer is trusted.
+func TestCandLangResolver(t *testing.T) {
+	cases := []struct {
+		name string
+		r    source.SearchResult
+		want string
+	}{
+		{"field wins", source.SearchResult{Language: "japanese"}, "japanese"},
+		{"field over decoration", source.SearchResult{Language: "japanese", EnglishTitle: "Foo [English]"}, "japanese"},
+		{"english decoration fallback", source.SearchResult{EnglishTitle: "Foo [English]"}, "english"},
+		{"japanese decoration fallback", source.SearchResult{JapaneseTitle: "Bar [Japanese]"}, "japanese"},
+		{"no signal", source.SearchResult{EnglishTitle: "Plain Title"}, ""},
+	}
+	for _, c := range cases {
+		if got := candLangResolver(c.r); got != c.want {
+			t.Errorf("%s: candLangResolver = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
