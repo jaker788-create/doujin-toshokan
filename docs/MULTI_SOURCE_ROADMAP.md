@@ -14,10 +14,12 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > shortcut is gated on the active provider), **3.1** (the query-struct refactor — the
 > string search contract is gone), **1.2** (the Hitomi provider — the first ID-only
 > source), **2.2** (the provider chain: cross-provider id routing + ordered fallback,
-> which also carried most of **2.5**), and **1.1** (the E-Hentai provider — keyless, so
-> **2.4 was never actually the gate** it was recorded as). **3.5 was attempted and
-> reverted** — not the quick win it looked like; see the item. Still open: the library
-> half of **2.5**, **2.4** (deferred, no longer blocking anything), and the rest of §3.
+> which also carried most of **2.5**), **1.1** (the E-Hentai provider — keyless, so
+> **2.4 was never actually the gate** it was recorded as), and **2.5** (the library half —
+> detail-page provenance chip + a faceted source filter through `SearchManga`).
+> **3.5 was attempted and reverted** — not the quick win it looked like; see the item.
+> Still open: **2.4** (deferred, no longer blocking anything), the page-count decision in
+> **2.3**, and the rest of §3.
 
 ---
 
@@ -262,16 +264,44 @@ field schema is the shape that registry is already trending toward.
 "Gallery not found" while the gallery plainly exists on ExHentai. Until then this is
 speculative UI for a hypothetical user.
 
-### 2.5 Source provenance in the library UI — **partly done**
-Provenance now rides through the *matching* path, because 2.2 made it a correctness
+### 2.5 Source provenance in the library UI — ✅ DONE
+Provenance rides through the *matching* path, because 2.2 made it a correctness
 requirement rather than a nicety: `MatchResult.SourceSlug`/`SourceLabel` record which
 provider produced the candidates, the apply methods take that slug (a ref only means
 something to the site that issued it — see the `fix:` that landed with 2.2), the match
 picker names its source, and sweep progress lines are tagged with it.
 
-**Still open:** the *library* side. `manga.source_slug` is stored but not shown on the
-detail page, and there is no "show untagged / tagged-by-X" filter. Cheap, and more useful
-now that one sweep really can produce a mixed library.
+The **library half** now landed too, as a display + filter change with no new plumbing:
+
+- **Detail page chip.** The byline reads `by <author> · <n> pages · [nhentai]`, and the
+  chip links to `#/?source=<slug>` — provenance is a way *in*, not just a label. The ref
+  rides in the tooltip rather than inline, which sidesteps 3.7 entirely: a UUID or
+  e-hentai's `618395/0439fa3666` reads badly next to a page count, and its shape is
+  per-provider knowledge.
+- **Library filter.** `SearchParams.SourceSlug` extends the `SearchManga` chokepoint
+  (invariant 3) — no parallel query — and reaches the UI as a picker beside "Sort by",
+  populated by the new `GetSourceFacets` bound method with counts.
+
+Three decisions worth not re-litigating:
+
+- **The facet list comes from the library, not the registry.** A title keeps its
+  `source_slug` after that source is disabled or removed, so options built from the
+  enabled sources would silently offer no way to find those titles. An unregistered slug
+  therefore labels as *itself* rather than being dropped. The picker is omitted entirely
+  when there is only one bucket and no active filter — on a never-swept library the
+  control could only ever say "Untagged".
+- **"Untagged" is a sentinel in the same field as a real slug** (`search.SourceNone`,
+  `"none"`), because it has to survive a URL round-trip as one value. That is a
+  collision risk by construction, so `providers_test.go` pins that no preset registers
+  it. Untagged matches NULL **or** empty string: migration 007 can leave either, and
+  splitting the two spellings would hide those rows from every filter value at once.
+- **Labels resolve backend-side** into `MangaDetail.SourceLabel`. `providerLabel` is
+  `providers.go`'s and the reader view has no source list of its own; sending the raw
+  slug would have meant a second registry in TypeScript.
+
+Verified against the live library (695 titles): facets came back nhentai 667 / mangadex 2
+/ untagged 26, summing exactly to the total, with each filter value returning precisely
+its faceted count.
 
 ---
 
@@ -346,14 +376,16 @@ prefix registry (2.1) ────────► ✅ done
 Hitomi provider (1.2) ────────► ✅ done — first ID-only provider; id_only surfaced in the UI
 multi-source fallback (2.2) ──► ✅ done — provider chain; id routing + ordered fallback
 E-Hentai provider (1.1) ──────► ✅ done — keyless; 2.4 was not the gate it looked like
-library provenance (2.5) ─────► NEXT: cheapest remaining win, and now four sources can mix
+library provenance (2.5) ─────► ✅ done — detail chip + faceted source filter
 ```
 
-**Next up: the library half of 2.5.** Four providers are live and a sweep can genuinely
-produce a mixed library, yet `manga.source_slug` is still invisible on the detail page and
-there is no "tagged by X / untagged" filter. The matching path already carries provenance,
-so this is a display + filter change, not plumbing — and it is what makes a mixed library
-legible after the fact rather than only at match time.
+**Next up: the remaining Small items in §3**, all independent, plus the one open decision
+in **2.3** (should `confidentMatch` stop early on artist + strong title when a provider
+reports no page count? — it is why MangaDex titles are the most expensive in a sweep).
+
+Note that **3.7 is now narrower than it reads**: the detail page sidesteps the ugly-id
+problem by putting the ref in a tooltip, so what is left is the *match picker's* `#<id>`
+display only.
 
 **Verified in the GUI (2026-07-18).** Every provider was probed live end to end (folder
 name → parser → API → mapped tags) *and* driven through the real UI, closing the gap this

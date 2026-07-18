@@ -71,13 +71,19 @@ and filtering were built once; every caller inherits them. When adding a new way
 to slice the library, **extend this function** rather than writing a parallel
 query.
 
-Two details inside it matter:
+Three details inside it matter:
 - **Sort is allow-listed, never interpolated.** The `sorts` map keys a handful of
   known sorts to SQL fragments; an unknown sort falls back to `m.title`. User
   input is never concatenated into the ORDER BY.
 - **Multi-tag filter is AND, not OR.** `GROUP BY m.id HAVING
   COUNT(DISTINCT mt.tag_id) = len(tagIDs)` means a title must carry *all* requested
   tags to match.
+- **`SourceSlug` carries a sentinel.** It filters on the `manga.source_slug`
+  provenance column, where `""` means any source, a slug matches exactly, and
+  `search.SourceNone` (`"none"`) means *never auto-tagged* — NULL **or** empty
+  string, because migration 007 can leave either. The sentinel shares a field with
+  real provider slugs, so `providers_test.go` pins that no preset ever registers it;
+  `internal/search` is a leaf that cannot import the registry to check itself.
 
 ### 4. File-serving must pass the path-traversal guard
 
@@ -186,6 +192,16 @@ than the active source.
 The `manga.source_slug` / `source_ref` link columns (migration 007) record
 which provider a title's tags came from as a `(slug, string-id)` pair — the provider-
 agnostic successor to the legacy `nhentai_gallery_id` they backfill from.
+
+Provenance is **readable after the fact**, not only at match time: the title page shows
+the source as a chip linking to the library filtered by it, and the library's source
+picker is populated by `search.SourceCounts` — a facet over what the library actually
+*holds*, deliberately not over the enabled sources. A title keeps its `source_slug`
+after that source is disabled or removed from the registry, so a picker built from
+config would silently offer no way to find those titles. For the same reason an
+unregistered slug labels as itself (`providerLabel`'s fallback) rather than being
+hidden. The slug→label mapping is resolved backend-side into `MangaDetail.SourceLabel`,
+because the registry is `providers.go`'s and the frontend has no view of it.
 
 ---
 
