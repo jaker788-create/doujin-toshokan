@@ -9,9 +9,9 @@ import {stash} from '../models';
 
 export function AddLibraryRoot():Promise<string>;
 
-export function ApplySourceMerge(arg1:number,arg2:Array<string>):Promise<Array<tag.Typed>>;
+export function ApplySourceMerge(arg1:number,arg2:string,arg3:Array<string>):Promise<Array<tag.Typed>>;
 
-export function ApplySourceTags(arg1:number,arg2:string):Promise<Array<tag.Typed>>;
+export function ApplySourceTags(arg1:number,arg2:string,arg3:string):Promise<Array<tag.Typed>>;
 
 export function CancelAutoTag():Promise<void>;
 

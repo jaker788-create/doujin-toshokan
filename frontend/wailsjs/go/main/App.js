@@ -6,12 +6,12 @@ export function AddLibraryRoot() {
   return window['go']['main']['App']['AddLibraryRoot']();
 }
 
-export function ApplySourceMerge(arg1, arg2) {
-  return window['go']['main']['App']['ApplySourceMerge'](arg1, arg2);
+export function ApplySourceMerge(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ApplySourceMerge'](arg1, arg2, arg3);
 }
 
-export function ApplySourceTags(arg1, arg2) {
-  return window['go']['main']['App']['ApplySourceTags'](arg1, arg2);
+export function ApplySourceTags(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ApplySourceTags'](arg1, arg2, arg3);
 }
 
 export function CancelAutoTag() {

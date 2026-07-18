@@ -1233,10 +1233,16 @@ function buildMatchPicker(
             res.local_tags.length > 24 ? `<span class="nh-more">+${res.local_tags.length - 24} more</span>` : ''}</div>`
         : `<div class="nh-local-tags nh-local-notags">no tags yet</div>`;
     const mergeCount = res.merge_gallery_ids?.length || 0;
+    // Which site these candidates came from. With more than one source in play a bare
+    // "#12345" is ambiguous — two sites can use the same numeric id — so the picker names
+    // its source, and applying sends that slug back (never the active one).
+    const srcTag = res.source_label
+        ? `<span class="nh-src">${esc(res.source_label)}</span>`
+        : '';
     const headHTML = auto
-        ? `<div class="nh-auto"><p class="nh-picker-head">Auto-matched — merges tags from ${mergeCount} galler${mergeCount === 1 ? 'y' : 'ies'}.</p>
+        ? `<div class="nh-auto"><p class="nh-picker-head">Auto-matched${srcTag ? ' from ' + srcTag : ''} — merges tags from ${mergeCount} galler${mergeCount === 1 ? 'y' : 'ies'}.</p>
              <button type="button" class="btn btn-primary nh-merge">Apply matched tags</button></div>`
-        : `<p class="nh-picker-head">Multiple possible matches — pick the right one:</p>`;
+        : `<p class="nh-picker-head">Multiple possible matches${srcTag ? ' on ' + srcTag : ''} — pick the right one:</p>`;
 
     wrap.innerHTML = `
         <div class="nh-local">${localCover}
@@ -1258,7 +1264,7 @@ function buildMatchPicker(
             disableAll(true);
             mergeBtn.textContent = 'Applying…';
             try {
-                const saved = await ApplySourceMerge(mangaId, res.merge_gallery_ids);
+                const saved = await ApplySourceMerge(mangaId, res.source_slug, res.merge_gallery_ids);
                 toast('Tags applied');
                 onApplied(saved);
             } catch (err) {
@@ -1304,7 +1310,7 @@ function buildMatchPicker(
             disableAll(true);
             applyBtn.textContent = 'Applying…';
             try {
-                const saved = await ApplySourceTags(mangaId, c.gallery_id);
+                const saved = await ApplySourceTags(mangaId, res.source_slug, c.gallery_id);
                 toast('Tags applied');
                 onApplied(saved);
             } catch (err) {

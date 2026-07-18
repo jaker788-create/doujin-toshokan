@@ -191,6 +191,8 @@ export namespace main {
 	    folder_path: string;
 	    cover_rel_path?: string;
 	    decision: string;
+	    source_slug: string;
+	    source_label: string;
 	    merge_gallery_ids: string[];
 	    candidates: SourceCandidate[];
 	
@@ -209,6 +211,8 @@ export namespace main {
 	        this.folder_path = source["folder_path"];
 	        this.cover_rel_path = source["cover_rel_path"];
 	        this.decision = source["decision"];
+	        this.source_slug = source["source_slug"];
+	        this.source_label = source["source_label"];
 	        this.merge_gallery_ids = source["merge_gallery_ids"];
 	        this.candidates = this.convertValues(source["candidates"], SourceCandidate);
 	    }

@@ -609,6 +609,11 @@ type SourceCandidate struct {
 // (no candidates at all). On an auto decision MergeGalleryIDs lists the variants whose
 // tags merge (the UI's one-click apply); the local cover is drawn from FolderPath +
 // CoverRelPath so the bulk review queue can show it.
+//
+// SourceSlug/SourceLabel record which provider produced Candidates. Every candidate in one
+// result comes from exactly one provider, and a gallery ref only means anything to the
+// provider that issued it — so applying must go back to *this* source, not to whichever
+// one happens to be active when the user clicks (see ApplySourceMerge).
 type MatchResult struct {
 	MangaID         int64             `json:"manga_id"`
 	LocalTitle      string            `json:"local_title"`
@@ -619,6 +624,8 @@ type MatchResult struct {
 	FolderPath      string            `json:"folder_path"`
 	CoverRelPath    *string           `json:"cover_rel_path"`
 	Decision        string            `json:"decision"`
+	SourceSlug      string            `json:"source_slug"`
+	SourceLabel     string            `json:"source_label"`
 	MergeGalleryIDs []string          `json:"merge_gallery_ids"`
 	Candidates      []SourceCandidate `json:"candidates"`
 }
@@ -666,6 +673,8 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 				FolderPath:      m.FolderPath,
 				CoverRelPath:    m.CoverRelPath,
 				Decision:        string(autotag.ActionAuto),
+				SourceSlug:      run.slug,
+				SourceLabel:     providerLabel(run.slug),
 				MergeGalleryIDs: []string{d.ID},
 				Candidates:      []SourceCandidate{galleryIDCandidate(d, m.PageCount, mi)},
 			}, nil
@@ -688,6 +697,8 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 		FolderPath:      m.FolderPath,
 		CoverRelPath:    m.CoverRelPath,
 		Decision:        string(dec.Action),
+		SourceSlug:      run.slug,
+		SourceLabel:     providerLabel(run.slug),
 		MergeGalleryIDs: applyGalleryIDs(dec.Apply),
 		Candidates:      []SourceCandidate{},
 	}
@@ -746,15 +757,24 @@ func (a *App) localLanguageTag(mangaID int64) string {
 // ApplySourceTags applies one explicitly chosen gallery (a manual pick in the review
 // list). It fetches the gallery, unions its tags with the title's existing tags
 // (preserving the local language), records the link, and returns the saved tag set.
-func (a *App) ApplySourceTags(mangaID int64, galleryID string) ([]tag.Typed, error) {
-	return a.ApplySourceMerge(mangaID, []string{galleryID})
+// slug names the provider the gallery ref belongs to (MatchResult.SourceSlug); "" means
+// the active source.
+func (a *App) ApplySourceTags(mangaID int64, slug, galleryID string) ([]tag.Typed, error) {
+	return a.ApplySourceMerge(mangaID, slug, []string{galleryID})
 }
 
 // ApplySourceMerge applies a set of galleries at once — the variants of one work that
 // the matcher merged. It fetches each, unions their tags (preserving manual tags + the
 // local language), stamps the primary (galleryIDs[0]) as the link, and returns the
 // saved, subject-ordered tag set so the UI can re-render its grouped chips.
-func (a *App) ApplySourceMerge(mangaID int64, galleryIDs []string) ([]tag.Typed, error) {
+//
+// slug is the provider the refs came from (MatchResult.SourceSlug), NOT the active source.
+// A gallery ref is only meaningful to the provider that issued it: a review queue can
+// outlive a source switch, and two sites can use the same numeric id, so resolving against
+// whatever is active risks fetching an unrelated gallery and stamping the wrong
+// source_slug. An empty slug falls back to the active provider, which keeps the method
+// usable from callers that have no provenance to hand.
+func (a *App) ApplySourceMerge(mangaID int64, slug string, galleryIDs []string) ([]tag.Typed, error) {
 	if len(galleryIDs) == 0 {
 		return nil, errors.New("no galleries to apply")
 	}
@@ -765,7 +785,7 @@ func (a *App) ApplySourceMerge(mangaID int64, galleryIDs []string) ([]tag.Typed,
 	if m == nil {
 		return nil, fmt.Errorf("manga %d not found", mangaID)
 	}
-	client, err := a.activeProvider()
+	client, err := a.providerBySlug(slug)
 	if err != nil {
 		return nil, err
 	}
@@ -1240,6 +1260,8 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 			FolderPath:    t.folderPath,
 			CoverRelPath:  t.coverRelPath,
 			Decision:      "review",
+			SourceSlug:    run.slug,
+			SourceLabel:   providerLabel(run.slug),
 			Candidates:    shortlist(reviewPool(dec.Ranked), reviewMax, mi),
 		})
 		prog.Outcome = "review"

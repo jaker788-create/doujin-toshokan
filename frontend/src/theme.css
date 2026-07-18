@@ -789,6 +789,8 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 /* Auto-decision header with the one-click merge-apply */
 .nh-auto { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); margin-bottom: var(--s-3); }
 .nh-auto .nh-picker-head { margin: 0; }
+/* Which source a match came from — matters once one queue can span sites. */
+.nh-src { color: var(--paper); font-weight: 600; }
 
 /* Covers: local (in the card) + remote nhentai candidate thumbnails */
 .nh-cover { width: 56px; aspect-ratio: 45 / 64; object-fit: cover; border-radius: var(--r-1); background: var(--ink-2); display: block; }

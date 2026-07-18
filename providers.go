@@ -43,6 +43,18 @@ var providerPresets = []providerPreset{
 	{Slug: hitomi.Slug, Label: hitomi.Label, NeedsKey: false, IDOnly: true},
 }
 
+// providerLabel maps a slug to its human label for display, falling back to the slug
+// itself for anything unregistered. The label is a presentation concern of the registry,
+// which is why the matcher's nhSearcher interface carries Slug() but not Label().
+func providerLabel(slug string) string {
+	for _, p := range providerPresets {
+		if p.Slug == slug {
+			return p.Label
+		}
+	}
+	return slug
+}
+
 // knownProvider reports whether slug names a built-in preset.
 func knownProvider(slug string) bool {
 	for _, p := range providerPresets {
@@ -92,6 +104,36 @@ func (a *App) activeProvider() (source.Provider, error) {
 		return nil, errNoSource
 	}
 	return buildProvider(sc)
+}
+
+// providerBySlug builds a specific configured provider by slug, falling back to the active
+// source when slug is empty. Apply paths use it to go back to the provider a candidate
+// actually came from: a gallery ref only means something to the site that issued it, so
+// resolving one against whichever source happens to be active can fetch an unrelated
+// gallery (two sites can use the same numeric id) and stamp the wrong source_slug.
+//
+// A slug that is not configured is an error rather than a silent fallback to the active
+// source — that would be the exact mis-resolution this exists to prevent.
+func (a *App) providerBySlug(slug string) (source.Provider, error) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return a.activeProvider()
+	}
+	cfg, err := config.Load(a.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, sc := range cfg.ResolveSources() {
+		if sc.Provider == slug {
+			return buildProvider(sc)
+		}
+	}
+	// Not in the configured list, but a known preset: build it from its defaults so a
+	// keyless source (mangadex, hitomi) still applies after, say, a config reset.
+	if knownProvider(slug) {
+		return buildProvider(config.SourceConfig{Provider: slug, Enabled: true})
+	}
+	return nil, fmt.Errorf("source %q is not configured", slug)
 }
 
 // SourceState is the maskable UI view of one configurable source: never the key itself,

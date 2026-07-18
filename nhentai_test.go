@@ -147,6 +147,75 @@ func TestApplyTagsUnionsExistingAndStampsGallery(t *testing.T) {
 	}
 }
 
+// A gallery ref only means something to the site that issued it, so an apply must resolve
+// against the source the candidate came from — never whichever one happens to be active.
+// A review queue outlives a source switch, and two sites can use the same numeric id, so
+// getting this wrong fetches an unrelated gallery and stamps the wrong provenance.
+func TestProviderBySlugIgnoresTheActiveSource(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.SetActiveSource("nhentai"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetSourceConfig("nhentai", "secret", "", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit slug wins over the active source, even for a source that was never
+	// configured (mangadex and hitomi need no key, so their presets suffice).
+	for _, slug := range []string{"mangadex", "hitomi", "nhentai"} {
+		p, err := a.providerBySlug(slug)
+		if err != nil {
+			t.Fatalf("providerBySlug(%q): %v", slug, err)
+		}
+		if p.Slug() != slug {
+			t.Errorf("providerBySlug(%q) built %q", slug, p.Slug())
+		}
+	}
+	// Empty means "no provenance recorded" and falls back to the active source.
+	p, err := a.providerBySlug("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Slug() != "nhentai" {
+		t.Errorf("providerBySlug(\"\") = %q, want the active nhentai", p.Slug())
+	}
+	// An unknown slug must error rather than silently falling back — a silent fallback is
+	// exactly the mis-resolution this guards against.
+	if _, err := a.providerBySlug("bogus"); err == nil {
+		t.Error("providerBySlug(bogus) should error, not fall back to the active source")
+	}
+}
+
+// The provider-neutral link columns must be stamped for every source, and the legacy
+// nhentai_gallery_id must be left alone for the others — it is an int column that a
+// non-nhentai ref may not even parse into.
+func TestApplyTagsStampsNonNhentaiSourceLink(t *testing.T) {
+	a := newTestApp(t)
+	id, err := ingest.IngestManga(a.db, ingest.MangaInput{
+		Title: "Test Title", Author: "Test Author", FolderPath: "/tmp/t", PageCount: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := &source.GalleryDetail{ID: "4056725", Tags: []tag.Typed{{Type: "tag", Name: "loli"}}}
+	if _, err := a.applyTags(id, "hitomi", "4056725", []*source.GalleryDetail{detail}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := search.GetManga(a.db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.SourceSlug == nil || *m.SourceSlug != "hitomi" {
+		t.Errorf("source_slug = %v, want hitomi", m.SourceSlug)
+	}
+	if m.SourceRef == nil || *m.SourceRef != "4056725" {
+		t.Errorf("source_ref = %v, want 4056725", m.SourceRef)
+	}
+	if m.NhentaiGalleryID != nil {
+		t.Errorf("nhentai_gallery_id = %v, want unset for a non-nhentai source", *m.NhentaiGalleryID)
+	}
+}
+
 func TestApplyTagsPreservesExistingLanguage(t *testing.T) {
 	a := newTestApp(t)
 	// The title already has a language tag; a merge from a different-language gallery
