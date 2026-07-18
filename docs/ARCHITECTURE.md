@@ -155,6 +155,19 @@ query). Such a provider sets `providerPreset.IDOnly`, which reaches the Settings
 as `SourceState.id_only` — a sweep that can only match id-bearing folders has to *say*
 so, or its "no match" results read as a bug rather than the contract.
 
+A sweep consults an ordered **chain** of providers, not one: a `<slug>-<id>` folder name
+routes to that slug's provider even when another is active, and a title with no id walks
+the enabled sources until one matches. The chain holds **one `autoTagRun` per provider**,
+and that is load-bearing — a run's `searchCache` is keyed by `SearchQuery.CacheKey()` and
+its `detailCache` by bare gallery id, both provider-scoped, so a shared cache would serve
+one site's gallery for another's identical numeric id.
+
+Candidates are **never pooled across providers**: each provider's decision is kept whole
+and one wins, so a title's candidates always come from exactly one source. Pooling would
+break the id dedupe (no provider namespace), mis-stamp `source_slug` for a merge set
+spanning sites, and compare scores that are not comparable. For the same reason applying
+resolves against `MatchResult.SourceSlug` rather than the active source.
+
 The `manga.source_slug` / `source_ref` link columns (migration 007) record
 which provider a title's tags came from as a `(slug, string-id)` pair — the provider-
 agnostic successor to the legacy `nhentai_gallery_id` they backfill from.
@@ -182,8 +195,9 @@ Backend packages under `internal/`. Each has one responsibility.
 
 Root `main` package: `app.go` (bound methods — the thin API layer that
 validates/clamps input and calls the packages above), `nhentai.go` (the tag-matching
-bound methods that drive `internal/autotag` over a `source.Provider`), `providers.go`
-(the provider registry + source-config bound methods), `assets.go` (binary file
+bound methods that drive `internal/autotag` over a chain of `source.Provider`s — the name
+predates both the chain and the multi-provider seam), `providers.go`
+(the provider registry, chain construction + source-config bound methods), `assets.go` (binary file
 handler), `main.go` (Wails wiring). Business logic lives in `internal/`, which keeps
 it unit-testable without a running window.
 

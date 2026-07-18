@@ -12,10 +12,11 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > (MangaDex 429 retry/backoff), **2.3 + 3.3** (provider-supplied `SearchResult.Language` fed
 > into ranking), **2.1** (folder-id prefix registry: nhentai + mangadex peel; the
 > shortcut is gated on the active provider), **3.1** (the query-struct refactor — the
-> string search contract is gone), and **1.2** (the Hitomi provider — the first ID-only
-> source). **3.5 was attempted and reverted** — not the quick win it looked like; see the
-> item. Still open: **1.1** (E-Hentai, blocked on 2.4), multi-source strategy (**2.2**),
-> and the rest of §3.
+> string search contract is gone), **1.2** (the Hitomi provider — the first ID-only
+> source), and **2.2** (the provider chain: cross-provider id routing + ordered fallback,
+> which also carried most of **2.5**). **3.5 was attempted and reverted** — not the quick
+> win it looked like; see the item. Still open: **1.1** (E-Hentai, blocked on 2.4), the
+> library half of **2.5**, and the rest of §3.
 
 ---
 
@@ -117,25 +118,58 @@ client-side over binary `.nozomi` index files, which is **L** and not worth it.
 each entry is a `{slug, leadingRef func(string) string}` matcher; `Parsed.GalleryID int64`
 became `SourceSlug`/`SourceRef string`, and `matchInput.galleryID` is now a `(sourceSlug,
 sourceRef)` pair. Registered: **nhentai** (`leadingDigits`), **mangadex** (`leadingUUID`,
-canonical 8-4-4-4-12) and **hitomi** (`leadingDigits`). The `MatchSource`/`runAutoTag` shortcut fires only when
-`mi.sourceSlug == run.slug` (the active provider), so a mismatched folder falls through to
-fuzzy instead of a doomed cross-provider `GalleryByID`.
+canonical 8-4-4-4-12) and **hitomi** (`leadingDigits`).
 - **Adding a source's shortcut** is a one-line `sourceDefs` row — hitomi (1.2) landed as
   exactly that. **ehentai** (`ehentai-<gid>-<token>`) still needs a new `gid-token` matcher
   (read `<digits>-<alnum>` → normalize to `gid/token`).
-- Left for **2.2**: a folder whose slug ≠ the active source is *not* routed to its own
-  provider (we only query the active one) — it falls to fuzzy. That cross-provider routing is
-  the multi-source strategy question below.
+- The leftover this item flagged — a folder whose slug ≠ the active source falling to fuzzy
+  instead of being routed to its own provider — **is closed by 2.2's cross-provider id
+  routing**. The shortcut now fires for any enabled provider named in a folder name, not
+  just the active one.
 
-### 2.2 Single active source vs. multi-source strategy
-Today exactly one source is active. Real libraries mix doujin (nhentai/e-h) and
-mainstream (MangaDex).
-- **Option A:** keep single-active (simplest; user switches per sweep).
-- **Option B (recommended):** per-sweep *ordered fallback* — try source 1, fall back to
-  source 2 on "no match". `gatherCandidates` would loop providers; `source_slug` already
-  records which one won.
-- **Option C:** merge across sources in one match (most complex; tag provenance + dedup
-  across sites gets hard). Probably not worth it.
+### 2.2 Multi-source strategy — ✅ DONE (Option B: ordered fallback)
+A sweep now consults a **provider chain** rather than only the active source, in two phases.
+
+**Cross-provider id routing.** A `<slug>-<id>` folder name routes to that slug's provider
+even when another source is active — the leftover 2.1 explicitly flagged. It is also
+*cheaper* than what it replaced (one exact fetch instead of a doomed multi-query search),
+and it is the only way an id-only provider can match at all.
+
+**Ordered fuzzy fallback.** A title with no embedded id walks the enabled sources in
+priority order (active first), advancing on anything short of an auto-apply. Opt-out per
+sweep (`AutoTagOptions.Fallback`, checkbox default on): advancing on `review` rather than
+only `none` costs a full pass per provider on every ambiguous title, so it needs an escape
+hatch. An **id-only** source is skipped in the fuzzy phase — its `Search` is empty by
+contract — while staying eligible for routing.
+
+Two design points worth not re-litigating:
+
+- **One `autoTagRun` per provider, never one run swapping clients.** A run's `searchCache`
+  is keyed by `SearchQuery.CacheKey()` and its `detailCache` by bare gallery id — both
+  provider-scoped. nhentai and hitomi both use numeric ids, so a shared cache would serve
+  one site's gallery for another's id. `TestChainCachesDoNotCollideAcrossProviders` pins it.
+- **Replace, not merge.** Candidates are never pooled across providers into one `Decide`
+  call: `gatherCandidates` dedupes by bare gallery id with no provider namespace,
+  `applyTags` stamps one slug for a whole merge set, and cross-provider scores are not
+  comparable (MangaDex reports `NumPages: 0` for every series, so its candidates can never
+  earn the page bonus). That last point is also why two review-only providers **tie-break on
+  chain order, not score** — comparing them would be a bogus comparison dressed up as
+  intelligence.
+
+The active provider failing to build stays a **hard error** even with fallback on: sweeping
+quietly with the others would hide the misconfiguration. A non-active source that fails to
+build is skipped, so one unconfigured extra source cannot abort a sweep.
+
+`MatchSource` walks the same chain, so the interactive path and a sweep cannot disagree
+about which source wins a title.
+
+**Deliberately not done: pipelining.** Running a fallback concurrently with the next title's
+primary search is possible — the providers have independent limiters — but the payoff was
+costed at ~2–3%. Wall clock is set by the tightest limiter (nhentai 3.3s/req) and that
+serializes regardless of goroutine structure; fallbacks run on MangaDex (250ms/req) or
+hitomi (**zero** requests). Against that: a thread-safe run cache with single-flight,
+ordered progress emission, and `MaxOpenConns(1)` keeping applies serialized anyway. The loop
+is structured so it stays possible if a real sweep ever proves slow.
 
 ### 2.3 MangaDex language + page-count handling
 MangaDex series have no single page count, and `candLangResolver` only reads language
@@ -155,10 +189,16 @@ needs two cookies.
   E-Hentai form? A small generic "secrets" editor keyed off a provider-declared schema
   scales better as sources grow.
 
-### 2.5 Source provenance in the library UI
-`manga.source_slug` is stored but not shown. Worth a small "tagged from MangaDex" badge
-on the detail page + a filter ("show untagged / tagged-by-X")? Cheap, and useful once
-more than one source is in play.
+### 2.5 Source provenance in the library UI — **partly done**
+Provenance now rides through the *matching* path, because 2.2 made it a correctness
+requirement rather than a nicety: `MatchResult.SourceSlug`/`SourceLabel` record which
+provider produced the candidates, the apply methods take that slug (a ref only means
+something to the site that issued it — see the `fix:` that landed with 2.2), the match
+picker names its source, and sweep progress lines are tagged with it.
+
+**Still open:** the *library* side. `manga.source_slug` is stored but not shown on the
+detail page, and there is no "show untagged / tagged-by-X" filter. Cheap, and more useful
+now that one sweep really can produce a mixed library.
 
 ---
 
@@ -231,22 +271,23 @@ docs update (1.3) ────────────► ✅ done
 query-struct refactor (3.1) ──► ✅ done — providers now own their wire format
 prefix registry (2.1) ────────► ✅ done
 Hitomi provider (1.2) ────────► ✅ done — first ID-only provider; id_only surfaced in the UI
+multi-source fallback (2.2) ──► ✅ done — provider chain; id routing + ordered fallback
 E-Hentai provider (1.1) ──────► NEXT: needs 2.4 (cookie auth in the UI); reuses 1.2's shape
-multi-source fallback (2.2) ──► after ≥2 useful providers exist
 ```
 
-**Next up: 1.1 (E-Hentai) — but decide 2.4 first.** 1.2 proved the ID-only shape end to
-end, so E-Hentai is mostly the same client with a different DTO; what is genuinely new is
-cookie auth in the Settings UI (2.4), and that is a decision, not a mechanical port. The
-`IDOnly` flag 1.2 added applies to E-Hentai unchanged.
+**Next up: 1.1 (E-Hentai) — but decide 2.4 first.** 1.2 proved the ID-only shape end to end
+and 2.2 built the chain that makes a fourth provider worth having, so E-Hentai is now mostly
+the same client with a different DTO: `providerPreset.IDOnly` and the id-routing phase both
+apply to it unchanged, and `SourceConfig.Secrets` already exists for its session cookies.
+What is genuinely new is **cookie auth in the Settings UI (2.4)** — a decision, not a
+mechanical port, and worth settling before the client is written.
 
-**2.2 is now the more valuable slice, though.** Two of three providers are id-only, so a
-mixed library can only ever tag against whichever single source is active — a hitomi-ripped
-folder sitting in a library swept under nhentai falls to fuzzy matching even though its id
-is right there in the name (see the note under 2.1). Ordered fallback (Option B) would fix
-that for the providers already shipped, without adding a fourth.
+**The cheapest remaining win is the library half of 2.5.** A sweep can now genuinely produce
+a mixed library, and `manga.source_slug` is still invisible on the detail page. The matching
+path already carries provenance, so this is a display + filter change, not plumbing.
 
 Remaining Small items, all independent: **3.4** (rename `nhSearcher` → `providerSearcher`,
 `nhentai.go` → `tagging.go` — note `internal/mangadex/client.go`'s package doc already
-refers to "the root tagging.go"), **3.6** (retire the legacy `Settings.HasNhentaiKey`),
-**3.7** (hide `#id` for non-numeric ids), **2.5** (source-provenance badge).
+refers to "the root tagging.go", and the file now holds the chain as well as the matcher, so
+the name has drifted further), **3.6** (retire the legacy `Settings.HasNhentaiKey`),
+**3.7** (hide `#id` for non-numeric ids).
