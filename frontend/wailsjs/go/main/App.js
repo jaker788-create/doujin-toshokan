@@ -30,6 +30,10 @@ export function DeleteManga(arg1) {
   return window['go']['main']['App']['DeleteManga'](arg1);
 }
 
+export function FilterOptions(arg1) {
+  return window['go']['main']['App']['FilterOptions'](arg1);
+}
+
 export function GetAuthor(arg1) {
   return window['go']['main']['App']['GetAuthor'](arg1);
 }
@@ -124,10 +128,6 @@ export function StashSave(arg1) {
 
 export function StashSetPage(arg1, arg2) {
   return window['go']['main']['App']['StashSetPage'](arg1, arg2);
-}
-
-export function SuggestAuthors(arg1) {
-  return window['go']['main']['App']['SuggestAuthors'](arg1);
 }
 
 export function SuggestTags(arg1) {

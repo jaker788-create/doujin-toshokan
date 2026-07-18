@@ -244,8 +244,8 @@ export namespace main {
 		}
 	}
 	export class SearchArgs {
-	    q: string;
-	    author_id: number;
+	    q: string[];
+	    author_ids: number[];
 	    tags: string[];
 	    source: string;
 	    sort: string;
@@ -260,7 +260,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.q = source["q"];
-	        this.author_id = source["author_id"];
+	        this.author_ids = source["author_ids"];
 	        this.tags = source["tags"];
 	        this.source = source["source"];
 	        this.sort = source["sort"];
@@ -432,6 +432,24 @@ export namespace search {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
+	    }
+	}
+	export class FilterOption {
+	    value: string;
+	    label: string;
+	    subject: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new FilterOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.value = source["value"];
+	        this.label = source["label"];
+	        this.subject = source["subject"];
+	        this.count = source["count"];
 	    }
 	}
 	export class Manga {

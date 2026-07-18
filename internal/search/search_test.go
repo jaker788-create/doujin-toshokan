@@ -3,6 +3,7 @@ package search
 import (
 	"database/sql"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"doujin/internal/ingest"
@@ -85,7 +86,7 @@ func eq(a, b []string) bool {
 func TestSearchByTitle(t *testing.T) {
 	db := newDB(t)
 	seed(t, db)
-	ms, err := SearchManga(db, SearchParams{Query: "blue"})
+	ms, err := SearchManga(db, SearchParams{Queries: []string{"blue"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,15 +95,58 @@ func TestSearchByTitle(t *testing.T) {
 	}
 }
 
+// Several free-text terms narrow (AND); they don't replace one another.
+func TestSearchByTitleRequiresAllTerms(t *testing.T) {
+	db := newDB(t)
+	seed(t, db)
+	ms, err := SearchManga(db, SearchParams{Queries: []string{"blue", "sky"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eq(titles(ms), []string{"Blue Sky"}) {
+		t.Errorf("both terms = %v, want [Blue Sky]", titles(ms))
+	}
+	none, err := SearchManga(db, SearchParams{Queries: []string{"blue", "forest"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("terms matching different titles = %v, want []", titles(none))
+	}
+}
+
 func TestFilterByAuthor(t *testing.T) {
 	db := newDB(t)
 	seed(t, db)
-	ms, err := SearchManga(db, SearchParams{AuthorID: authorID(t, db, "Mori")})
+	ms, err := SearchManga(db, SearchParams{AuthorIDs: []int64{authorID(t, db, "Mori")}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !eq(titles(ms), []string{"Forest"}) {
 		t.Errorf("titles = %v, want [Forest]", titles(ms))
+	}
+}
+
+// Authors widen (OR) rather than narrow: one title has one author, so ANDing two
+// could only ever return nothing.
+func TestFilterByAuthorsUnions(t *testing.T) {
+	db := newDB(t)
+	seed(t, db)
+	ids := []int64{authorID(t, db, "Aoi"), authorID(t, db, "Mori")}
+	ms, err := SearchManga(db, SearchParams{AuthorIDs: ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eq(titles(ms), []string{"Blue Sky", "Forest"}) {
+		t.Errorf("two authors = %v, want [Blue Sky Forest]", titles(ms))
+	}
+	// A 0 id is "unset", not a real author — it must not filter everything out.
+	all, err := SearchManga(db, SearchParams{AuthorIDs: []int64{0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Errorf("zero author id = %v, want all titles", titles(all))
 	}
 }
 
@@ -200,6 +244,72 @@ func TestSortRandomSeeded(t *testing.T) {
 	}
 }
 
+func TestListFilterOptions(t *testing.T) {
+	db := newDB(t)
+	seed(t, db)
+	// A third title under Aoi, so authors have something to order by.
+	if _, err := ingest.IngestManga(db, ingest.MangaInput{
+		Title: "Blue Sea", Author: "Aoi", FolderPath: "/p3", PageCount: 5, Tags: gen("action"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := ListFilterOptions(db, "tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// action is on two titles, so it leads; every option carries its count.
+	if len(tags) != 3 || tags[0].Value != "action" || tags[0].Count != 2 {
+		t.Fatalf("tags = %+v, want action(2) first of 3", tags)
+	}
+	if tags[0].Label != tags[0].Value {
+		t.Errorf("tag label = %q, want it to match the value", tags[0].Label)
+	}
+
+	authors, err := ListFilterOptions(db, "author")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(authors) != 2 || authors[0].Label != "Aoi" || authors[0].Count != 2 {
+		t.Fatalf("authors = %+v, want Aoi(2) first of 2", authors)
+	}
+	// The value has to be the id, not the name: that is what the filter takes.
+	if authors[0].Value != strconv.FormatInt(authorID(t, db, "Aoi"), 10) {
+		t.Errorf("author value = %q, want the author id", authors[0].Value)
+	}
+
+	titles, err := ListFilterOptions(db, "title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eq([]string{titles[0].Value, titles[1].Value, titles[2].Value},
+		[]string{"Blue Sea", "Blue Sky", "Forest"}) {
+		t.Errorf("titles = %+v, want the three titles alphabetically", titles)
+	}
+
+	if _, err := ListFilterOptions(db, "nonsense"); err == nil {
+		t.Error("unknown kind should error rather than silently return nothing")
+	}
+}
+
+// An orphan tag filters down to an empty grid, so the picker must not offer it.
+func TestListFilterOptionsSkipsUnusedTags(t *testing.T) {
+	db := newDB(t)
+	seed(t, db)
+	if _, err := ingest.GetOrCreateTag(db, "orphan", tag.General); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := ListFilterOptions(db, "tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range opts {
+		if o.Value == "orphan" {
+			t.Fatalf("unused tag offered as a filter option: %+v", opts)
+		}
+	}
+}
+
 func TestSuggestTagsPrefix(t *testing.T) {
 	db := newDB(t)
 	seed(t, db)
@@ -209,28 +319,6 @@ func TestSuggestTagsPrefix(t *testing.T) {
 	}
 	if !eq(names, []string{"scifi"}) {
 		t.Errorf("suggestions = %v, want [scifi]", names)
-	}
-}
-
-func TestSuggestAuthorsSubstring(t *testing.T) {
-	db := newDB(t)
-	seed(t, db)
-	got, err := SuggestAuthors(db, "or", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Name != "Mori" {
-		t.Errorf("substring 'or' = %v, want [Mori]", got)
-	}
-	if got[0].ID <= 0 {
-		t.Error("author id should be positive (needed for filtering)")
-	}
-	all, err := SuggestAuthors(db, "", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 2 || all[0].Name != "Aoi" || all[1].Name != "Mori" {
-		t.Errorf("empty prefix = %v, want [Aoi Mori]", all)
 	}
 }
 
@@ -262,14 +350,14 @@ func TestSearchCombinesAuthorQueryAndTags(t *testing.T) {
 	action, _ := ingest.GetOrCreateTag(db, "action", tag.General)
 	scifi, _ := ingest.GetOrCreateTag(db, "scifi", tag.General)
 
-	ms, err := SearchManga(db, SearchParams{Query: "blue", AuthorID: aoi, TagIDs: []int64{action, scifi}})
+	ms, err := SearchManga(db, SearchParams{Queries: []string{"blue"}, AuthorIDs: []int64{aoi}, TagIDs: []int64{action, scifi}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !eq(titles(ms), []string{"Blue Sky"}) {
 		t.Errorf("combined filter = %v, want [Blue Sky]", titles(ms))
 	}
-	wrong, err := SearchManga(db, SearchParams{AuthorID: mori, TagIDs: []int64{action, scifi}})
+	wrong, err := SearchManga(db, SearchParams{AuthorIDs: []int64{mori}, TagIDs: []int64{action, scifi}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +385,7 @@ func TestGetMangaAndTags(t *testing.T) {
 	}
 }
 
-func TestListAuthorsAndTags(t *testing.T) {
+func TestListAuthors(t *testing.T) {
 	db := newDB(t)
 	seed(t, db)
 	authors, err := ListAuthors(db)
@@ -306,19 +394,6 @@ func TestListAuthorsAndTags(t *testing.T) {
 	}
 	if len(authors) != 2 || authors[0].Name != "Aoi" || authors[1].Name != "Mori" {
 		t.Errorf("authors = %v, want [Aoi Mori]", authors)
-	}
-	tags, err := ListTags(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]bool{}
-	for _, tg := range tags {
-		got[tg.Name] = true
-	}
-	for _, want := range []string{"action", "scifi", "slice-of-life"} {
-		if !got[want] {
-			t.Errorf("missing tag %q in %v", want, tags)
-		}
 	}
 }
 

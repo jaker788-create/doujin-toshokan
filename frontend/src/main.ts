@@ -1,7 +1,7 @@
 import './theme.css';
 import {
-    Search, Count, GetManga, GetAuthor, GetSourceFacets,
-    SuggestTags, SuggestTagsTyped, SuggestAuthors,
+    Search, Count, GetManga, GetAuthor, GetSourceFacets, FilterOptions,
+    SuggestTags, SuggestTagsTyped,
     UpdateTags, SetDisplayTitle, GetUnimported, Ingest, ImportAll, Rescan,
     CountMissing, RemoveMissing, DeleteManga,
     GetConfig, AddLibraryRoot, RemoveLibraryRoot,
@@ -16,6 +16,7 @@ import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
 type Manga = search.Manga;
 type MangaDetail = main.MangaDetail;
 type SourceFacet = main.SourceFacet;
+type FilterOption = search.FilterOption;
 
 // The title shown to the user: a user-set display override when present, else the
 // canonical (folder-parsed) title. The canonical title is what nhentai matching uses, so
@@ -211,10 +212,19 @@ function viewEl(): HTMLElement {
 
 // ───── toast ──────────────────────────────────────────────────────
 const toastRegion = document.getElementById('toast-region')!;
-function toast(msg: string, kind: 'ok' | 'err' = 'ok'): void {
+// An optional action turns the toast into a one-click follow-up (e.g. "Saved for later
+// · Open stash") so the result of a background save is never a dead end.
+function toast(msg: string, kind: 'ok' | 'err' = 'ok', action?: { label: string; href: string }): void {
     const el = document.createElement('div');
     el.className = 'toast' + (kind === 'err' ? ' toast-err' : '');
     el.textContent = msg;
+    if (action) {
+        const a = document.createElement('a');
+        a.className = 'toast-action';
+        a.href = action.href;
+        a.textContent = action.label;
+        el.append(' ', a);
+    }
     toastRegion.appendChild(el);
     requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('in')));
     setTimeout(() => {
@@ -224,9 +234,10 @@ function toast(msg: string, kind: 'ok' | 'err' = 'ok'): void {
 }
 
 interface Filter {
-    titleText: string;
-    authorId: string;
-    authorName: string;
+    // Every filter kind stacks. Title terms and tags narrow (AND); authors widen (OR),
+    // because a title has exactly one author and requiring two would match nothing.
+    titleTexts: string[];
+    authorIds: string[];
     tags: string[];
     // source is a provider slug ('nhentai', …), 'none' for titles that were never
     // auto-tagged, or '' for any. The slug is the backend's, so it round-trips
@@ -285,31 +296,82 @@ async function render(): Promise<void> {
 // order key ((id + seed) * C) stays well within int64.
 function newSeed(): string { return String(Math.floor(Math.random() * 2147483647)); }
 
-function navigateToFilter(f: Filter): void {
+// The hash a filter navigates to. Shared with "Save search" so a saved entry is
+// exactly the chip set the builder is showing.
+function filterHash(f: Filter): string {
     const p = new URLSearchParams();
-    if (f.titleText) p.set('q', f.titleText);
+    // Repeated keys, not comma-joined values: URLSearchParams round-trips them, and a
+    // title or tag containing a comma stays intact.
+    f.titleTexts.filter(Boolean).forEach((t) => p.append('q', t));
     p.set('sort', f.sort);
     if (f.sort === 'random' && f.seed) p.set('seed', f.seed);
-    if (f.authorId) p.set('author', f.authorId);
+    f.authorIds.filter(Boolean).forEach((id) => p.append('author', id));
     if (f.source) p.set('source', f.source);
     f.tags.filter(Boolean).forEach((t) => p.append('tag', t));
-    const target = '#/?' + p.toString();
+    return '#/?' + p.toString();
+}
+
+function navigateToFilter(f: Filter): void {
+    const target = filterHash(f);
     if (location.hash === target) render();
     else location.hash = target;
 }
 
 // ───── library view ───────────────────────────────────────────────
+// The outline bookmark used by every "save for later" affordance (header button,
+// card overlay, empty-state copy) so they're recognisably the same action.
+const BOOKMARK_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>`;
+
 function cardHtml(m: Manga): string {
     const cover = m.cover_rel_path
         ? `<img loading="lazy" src="${thumbURL(m.folder_path + '/' + m.cover_rel_path)}" alt="">`
         : `<div class="nocover"></div>`;
+    // The save button is a sibling of .card-main (not inside it): a button nested in an
+    // anchor is invalid, and .card is the positioning context either way — same shape
+    // as the stash card's remove ×.
     return `<div class="card${m.missing ? ' missing' : ''}">
         <a class="card-main" href="#/manga/${m.id}">
             <div class="card-cover">${cover}</div>
             <div class="meta"><span class="t">${esc(displayTitle(m))}</span></div>
         </a>
+        <button type="button" class="card-stash" data-stash-id="${m.id}" data-stash-title="${esc(displayTitle(m))}"
+            aria-label="Save for later" title="Save for later">${BOOKMARK_SVG}</button>
         <a class="a author-link" href="#/?author=${m.author_id}" data-author-name="${esc(m.author_name)}">${esc(m.author_name)}</a>
     </div>`;
+}
+
+// Save the composed search — the chips as shown, staged ones included, so what lands
+// in the stash is what the builder says rather than whatever the last committed URL
+// happened to be.
+async function saveSearch(f: Filter): Promise<void> {
+    const hash = filterHash(f).replace(/^#/, '');
+    const qi = hash.indexOf('?');
+    try {
+        await StashSave({
+            kind: 'search', hash,
+            label: searchLabel(new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '')),
+            manga_id: 0, page: 0,
+        });
+        toast('Search saved for later', 'ok', { label: 'Open stash', href: '#/stash' });
+    } catch (err) {
+        console.error(err);
+        toast("Couldn't save this search", 'err');
+    }
+}
+
+// saveTitleForLater is the one card-level save path, shared by the hover bookmark button
+// and the right-click menu item. Both stash the title in the background — you keep the
+// view you're on and pick it up later from the Saved Stash.
+async function saveTitleForLater(id: number, title: string): Promise<boolean> {
+    try {
+        await StashSave({ kind: 'title', hash: `/manga/${id}`, label: title, manga_id: id, page: 0 });
+        toast('Saved for later', 'ok', { label: 'Open stash', href: '#/stash' });
+        return true;
+    } catch (err) {
+        console.error(err);
+        toast("Couldn't save the title", 'err');
+        return false;
+    }
 }
 
 // sourcePicker renders the tag-provenance filter. It is omitted entirely when the
@@ -332,8 +394,16 @@ function sourcePicker(facets: SourceFacet[], active: string): string {
     </label>`;
 }
 
+// The builder's filter type outlives a search. Running one re-renders the whole view,
+// which used to reset this select to "Title" — so a second tag typed straight after a
+// tag search was silently filed as title text instead of stacking as another #tag.
+// builderRefocus does the same for the caret, so filters can be typed back to back.
+let builderType = 'title';
+let builderRefocus = false;
+
 function libraryMarkup(total: number, sort: string, facets: SourceFacet[], source: string): string {
     const sel = (v: string) => (sort === v ? ' selected' : '');
+    const tsel = (v: string) => (builderType === v ? ' selected' : '');
     const skeletons = Array.from({ length: 6 }, () =>
         `<div class="card skeleton" aria-hidden="true"><div class="card-cover"></div><div class="meta"></div></div>`).join('');
     return `
@@ -344,17 +414,22 @@ function libraryMarkup(total: number, sort: string, facets: SourceFacet[], sourc
     <div class="builder">
         <div class="builder-row">
             <select class="builder-type" aria-label="Filter type">
-                <option value="title">Title</option>
-                <option value="author">Author</option>
-                <option value="tag">Tag</option>
+                <option value="title"${tsel('title')}>Title</option>
+                <option value="author"${tsel('author')}>Author</option>
+                <option value="tag"${tsel('tag')}>Tag</option>
             </select>
-            <input class="builder-value" type="text" autocomplete="off" placeholder="Add a filter…" aria-label="Filter value" list="builder-suggest">
-            <datalist id="builder-suggest"></datalist>
+            <div class="builder-field">
+                <input class="builder-value" type="text" autocomplete="off" placeholder="Add a filter…"
+                    aria-label="Filter value" role="combobox" aria-expanded="false"
+                    aria-controls="builder-options" aria-autocomplete="list">
+                <div class="builder-options" id="builder-options" role="listbox" hidden></div>
+            </div>
             <button type="button" class="btn builder-add">Add</button>
             <button type="button" class="btn btn-primary builder-run">Search</button>
         </div>
         <div class="builder-foot">
             <div class="builder-chips" aria-live="polite"></div>
+            <button type="button" class="btn builder-save" title="Save this search to the Saved Stash">${BOOKMARK_SVG}Save search</button>
             <button type="button" class="btn builder-shuffle${sort === 'random' ? ' is-on' : ''}" aria-pressed="${sort === 'random'}" title="Shuffle results">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>Shuffle
             </button>
@@ -374,9 +449,8 @@ function libraryMarkup(total: number, sort: string, facets: SourceFacet[], sourc
 
 async function renderLibrary(params: URLSearchParams): Promise<void> {
     const filter: Filter = {
-        titleText: params.get('q') || '',
-        authorId: params.get('author') || '',
-        authorName: '',
+        titleTexts: params.getAll('q').filter(Boolean),
+        authorIds: params.getAll('author').filter(Boolean),
         tags: params.getAll('tag').filter(Boolean),
         source: params.get('source') || '',
         sort: params.get('sort') || 'title',
@@ -385,15 +459,17 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
     // A 'random' route must carry a seed so every infinite-scroll page (and a
     // scroll-restore on return) sees the same shuffle; mint one if absent.
     if (filter.sort === 'random' && !filter.seed) filter.seed = newSeed();
-    if (filter.authorId) {
-        filter.authorName = authorNames[filter.authorId] || '';
-        if (!filter.authorName) {
+    // Chips label authors by name, but a hash can arrive carrying only ids (a saved
+    // search, a shared link). Resolve the ones we haven't seen, in parallel; a failure
+    // just leaves that chip showing its id.
+    await Promise.all(filter.authorIds
+        .filter((id) => !authorNames[id])
+        .map(async (id) => {
             try {
-                const a = await GetAuthor(parseInt(filter.authorId, 10));
-                if (a) { filter.authorName = a.name; authorNames[filter.authorId] = a.name; }
+                const a = await GetAuthor(parseInt(id, 10));
+                if (a) authorNames[id] = a.name;
             } catch { /* show the id */ }
-        }
-    }
+        }));
 
     let total = 0;
     let facets: SourceFacet[] = [];
@@ -431,8 +507,8 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
     async function fetchPage(): Promise<void> {
         try {
             const data = await Search({
-                q: filter.titleText,
-                author_id: filter.authorId ? parseInt(filter.authorId, 10) : 0,
+                q: filter.titleTexts,
+                author_ids: filter.authorIds.map((id) => parseInt(id, 10)),
                 tags: filter.tags,
                 source: filter.source,
                 sort: filter.sort,
@@ -496,12 +572,26 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
         }
     }, { capture: true });
 
-    wireBuilder(filter);
+    // Hover bookmark on a card: save the title for later without leaving the grid. The
+    // button stays lit afterwards so the row you just saved is obvious.
+    grid.addEventListener('click', async (e) => {
+        const btn = (e.target as HTMLElement).closest('.card-stash') as HTMLButtonElement | null;
+        if (!btn) return;
+        e.preventDefault();
+        btn.disabled = true;
+        const ok = await saveTitleForLater(Number(btn.dataset.stashId), btn.dataset.stashTitle || 'Title');
+        btn.classList.toggle('saved', ok);
+        btn.disabled = false;
+    });
+
+    const unwireBuilder = wireBuilder(filter);
     lastBrowseHash = location.hash;
-    viewCleanup = () => io.disconnect();
+    viewCleanup = () => { io.disconnect(); unwireBuilder(); };
 }
 
-function wireBuilder(filter: Filter): void {
+// Returns a cleanup for the listeners it puts on the document (the option picker's
+// click-outside), which the view must call when it goes away.
+function wireBuilder(filter: Filter): () => void {
     const builder = viewEl().querySelector('.builder')!;
     const typeSel = builder.querySelector('.builder-type') as HTMLSelectElement;
     const valueInput = builder.querySelector('.builder-value') as HTMLInputElement;
@@ -509,18 +599,19 @@ function wireBuilder(filter: Filter): void {
     const runBtn = builder.querySelector('.builder-run') as HTMLButtonElement;
     const sortSel = builder.querySelector('.builder-sort') as HTMLSelectElement;
     const chipsTray = builder.querySelector('.builder-chips') as HTMLElement;
-    const datalist = builder.querySelector('#builder-suggest') as HTMLDataListElement;
-    let authorByName: Record<string, number> = {};
-    let lastAuthorName = '';
+    const field = builder.querySelector('.builder-field') as HTMLElement;
+    const optionsEl = builder.querySelector('.builder-options') as HTMLElement;
 
     function chipHtml(kind: string, label: string, value?: string): string {
         const v = value === undefined ? '' : ` data-value="${esc(value)}"`;
         return `<span class="chip" data-kind="${esc(kind)}"${v}>${esc(label)}<a href="#" class="chip-x" aria-label="Remove filter">×</a></span>`;
     }
+    // Every chip carries its own value, so removing one of several of the same kind
+    // takes out that one rather than the whole kind.
     function renderChips(): void {
         const out: string[] = [];
-        if (filter.titleText) out.push(chipHtml('title', 'title: ' + filter.titleText));
-        if (filter.authorId) out.push(chipHtml('author', 'author: ' + (filter.authorName || filter.authorId)));
+        filter.titleTexts.forEach((t) => out.push(chipHtml('title', 'title: ' + t, t)));
+        filter.authorIds.forEach((id) => out.push(chipHtml('author', 'author: ' + (authorNames[id] || id), id)));
         filter.tags.forEach((t) => out.push(chipHtml('tag', '#' + t, t)));
         chipsTray.innerHTML = out.join('');
     }
@@ -532,82 +623,280 @@ function wireBuilder(filter: Filter): void {
         e.preventDefault();
         const ch = x.closest('.chip') as HTMLElement;
         const kind = ch.dataset.kind;
-        if (kind === 'title') filter.titleText = '';
-        else if (kind === 'author') { filter.authorId = ''; filter.authorName = ''; }
-        else if (kind === 'tag') filter.tags = filter.tags.filter((t) => t !== ch.dataset.value);
+        const value = ch.dataset.value;
+        if (kind === 'title') filter.titleTexts = filter.titleTexts.filter((t) => t !== value);
+        else if (kind === 'author') filter.authorIds = filter.authorIds.filter((id) => id !== value);
+        else if (kind === 'tag') filter.tags = filter.tags.filter((t) => t !== value);
         renderChips();
     });
 
-    let suggestTimer: number | undefined;
-    async function fetchSuggestions(type: string, token: string): Promise<void> {
-        if (!token) return;
-        try {
-            if (type === 'author') {
-                const data = await SuggestAuthors(token);
-                authorByName = {};
-                data.forEach((a) => { authorByName[a.name] = a.id; });
-                datalist.innerHTML = data.map((a) => `<option value="${esc(a.name)}">`).join('');
-            } else if (type === 'tag') {
-                const data = await SuggestTags(token);
-                datalist.innerHTML = data.map((n) => `<option value="${esc(n)}">`).join('');
-            }
-        } catch { /* suggestions are best-effort */ }
+    // ── Option picker ────────────────────────────────────────────────
+    // Clicking the field lists what the library actually holds for the selected chip
+    // kind — the tags in use, the authors on the shelf, the titles — instead of an
+    // empty box that only rewards a guessed prefix.
+    //
+    // The whole list is fetched once per kind and narrowed locally on every keystroke,
+    // so typing never waits on a round trip and never races an earlier response. The
+    // cache lives in this closure, so it is rebuilt on the next render — which is also
+    // how it stays honest after a rescan or a tag edit.
+    const optionCache: Record<string, FilterOption[]> = {};
+    const pending: Record<string, Promise<FilterOption[]>> = {};
+    const loadFailed: Record<string, boolean> = {};
+    const MAX_ROWS = 200; // a listbox longer than this is a wall, not a menu
+    let shown: FilterOption[] = [];
+    let activeIdx = -1;
+
+    // Focus and click both open the panel, so the same kind can be asked for twice
+    // before the first answer lands: the in-flight promise is shared rather than
+    // re-fetched. A failure drops out of `pending` so the next open retries.
+    async function ensureOptions(kind: string): Promise<FilterOption[]> {
+        if (optionCache[kind]) return optionCache[kind];
+        if (!pending[kind]) {
+            pending[kind] = FilterOptions(kind).then((data) => {
+                optionCache[kind] = data;
+                loadFailed[kind] = false;
+                return data;
+            }, (err) => {
+                console.error(err);
+                loadFailed[kind] = true;
+                delete pending[kind];
+                return [];
+            });
+        }
+        return pending[kind];
     }
 
-    valueInput.addEventListener('input', () => {
-        datalist.innerHTML = '';
-        if (typeSel.value === 'title') return;
-        window.clearTimeout(suggestTimer);
-        suggestTimer = window.setTimeout(() => fetchSuggestions(typeSel.value, valueInput.value.trim()), 150);
+    // Is this option already a chip? Drives the lit state, and lets a second click
+    // take it back off.
+    function isPicked(kind: string, value: string): boolean {
+        if (kind === 'tag') return filter.tags.includes(value);
+        if (kind === 'author') return filter.authorIds.includes(value);
+        return filter.titleTexts.includes(value);
+    }
+
+    function renderOptions(): void {
+        const kind = typeSel.value;
+        const all = optionCache[kind] || [];
+        const token = valueInput.value.trim().toLowerCase();
+        if (!token) {
+            shown = all;
+        } else {
+            // Prefix matches first: typing "act" should put "action" above "reaction".
+            const starts: FilterOption[] = [];
+            const contains: FilterOption[] = [];
+            for (const o of all) {
+                const l = o.label.toLowerCase();
+                if (l.startsWith(token)) starts.push(o);
+                else if (l.includes(token)) contains.push(o);
+            }
+            shown = starts.concat(contains);
+        }
+        if (activeIdx >= shown.length) activeIdx = shown.length - 1;
+
+        if (loadFailed[kind]) {
+            optionsEl.innerHTML = `<p class="opt-note">Couldn't load the list — typing still works.</p>`;
+            return;
+        }
+        if (!shown.length) {
+            optionsEl.innerHTML = `<p class="opt-note">${all.length ? 'Nothing matches' : 'Nothing to pick yet'}.</p>`;
+            return;
+        }
+        const rows = shown.slice(0, MAX_ROWS).map((o, i) => {
+            const picked = isPicked(kind, o.value);
+            const meta = [o.subject, o.count ? String(o.count) : ''].filter(Boolean).join(' · ');
+            return `<button type="button" class="opt${picked ? ' is-on' : ''}${i === activeIdx ? ' is-active' : ''}"
+                role="option" aria-selected="${picked}" data-i="${i}">
+                <span class="opt-label">${esc(o.label)}</span>
+                <span class="opt-meta">${esc(meta)}</span>
+            </button>`;
+        });
+        // Never let a cap masquerade as the whole list.
+        if (shown.length > MAX_ROWS) {
+            rows.push(`<p class="opt-note">+${shown.length - MAX_ROWS} more — keep typing to narrow.</p>`);
+        }
+        optionsEl.innerHTML = rows.join('');
+    }
+
+    function setActive(i: number): void {
+        activeIdx = i;
+        renderOptions();
+        optionsEl.querySelector('.opt.is-active')?.scrollIntoView({ block: 'nearest' });
+    }
+
+    function closeOptions(): void {
+        optionsEl.hidden = true;
+        activeIdx = -1;
+        valueInput.setAttribute('aria-expanded', 'false');
+    }
+
+    // Set while focus is being restored after a search: the caret belongs back in the
+    // field, but dropping a 300px panel over the results the user just asked for does not.
+    let suppressOpen = false;
+
+    async function openOptions(): Promise<void> {
+        if (suppressOpen) return;
+        const kind = typeSel.value;
+        optionsEl.hidden = false;
+        valueInput.setAttribute('aria-expanded', 'true');
+        if (!optionCache[kind]) {
+            optionsEl.innerHTML = `<p class="opt-note">Loading…</p>`;
+            await ensureOptions(kind);
+            // The user may have switched kinds or closed the panel while that was in
+            // flight; only paint if this is still what they're looking at.
+            if (optionsEl.hidden || typeSel.value !== kind) return;
+        }
+        renderOptions();
+    }
+
+    // Picking toggles: click an option to add its chip, click it again to take it off.
+    // The field clears so the next one can be typed, and the panel stays open — picking
+    // three tags in a row is the common case.
+    function togglePick(o: FilterOption): void {
+        const kind = typeSel.value;
+        if (kind === 'tag') {
+            filter.tags = isPicked(kind, o.value)
+                ? filter.tags.filter((t) => t !== o.value) : [...filter.tags, o.value];
+        } else if (kind === 'author') {
+            authorNames[o.value] = o.label;
+            filter.authorIds = isPicked(kind, o.value)
+                ? filter.authorIds.filter((id) => id !== o.value) : [...filter.authorIds, o.value];
+        } else {
+            filter.titleTexts = isPicked(kind, o.value)
+                ? filter.titleTexts.filter((t) => t !== o.value) : [...filter.titleTexts, o.value];
+        }
+        valueInput.value = '';
+        renderChips();
+        renderOptions();
+    }
+
+    // mousedown, not click: the default would blur the input and close the panel out
+    // from under the click that was meant to pick a row.
+    optionsEl.addEventListener('mousedown', (e) => e.preventDefault());
+    optionsEl.addEventListener('click', (e) => {
+        const row = (e.target as HTMLElement).closest('.opt') as HTMLElement | null;
+        if (!row) return;
+        const o = shown[parseInt(row.dataset.i!, 10)];
+        if (o) togglePick(o);
     });
-    typeSel.addEventListener('change', () => {
-        datalist.innerHTML = '';
+
+    valueInput.addEventListener('focus', () => { void openOptions(); });
+    valueInput.addEventListener('click', () => { void openOptions(); });
+    valueInput.addEventListener('input', () => {
+        activeIdx = -1;
+        if (optionsEl.hidden) void openOptions();
+        else renderOptions();
+    });
+
+    // A click anywhere else dismisses the panel. Registered on the document, so it is
+    // handed back to renderLibrary to unregister when the view goes away.
+    const onDocDown = (e: MouseEvent) => {
+        if (!field.contains(e.target as Node)) closeOptions();
+    };
+    document.addEventListener('mousedown', onDocDown);
+
+    function syncPlaceholder(): void {
         valueInput.placeholder = typeSel.value === 'title' ? 'Title text…'
             : typeSel.value === 'author' ? 'Author name…' : 'Tag…';
-        valueInput.focus();
+    }
+    typeSel.addEventListener('change', () => {
+        builderType = typeSel.value;
+        // A token typed for one kind rarely means anything for the next, and leaving it
+        // would silently narrow the new list by it.
+        valueInput.value = '';
+        activeIdx = -1;
+        syncPlaceholder();
+        valueInput.focus(); // fires focus → openOptions for the newly selected kind
     });
-
-    async function resolveAuthorId(name: string): Promise<number | null> {
-        if (authorByName[name] != null) { lastAuthorName = name; return authorByName[name]; }
-        try {
-            const data = await SuggestAuthors(name);
-            const hit = data.find((a) => a.name.toLowerCase() === name.toLowerCase())
-                || (data.length === 1 ? data[0] : null);
-            if (hit) { lastAuthorName = hit.name; return hit.id; }
-        } catch { /* fall through to "no match" */ }
-        return null;
+    syncPlaceholder();
+    // Searching re-rendered the view out from under the caret; put it back so the next
+    // filter can be typed straight away instead of clicking into the field again. The
+    // picker stays shut here — the results are what was just asked for.
+    if (builderRefocus) {
+        builderRefocus = false;
+        suppressOpen = true;
+        valueInput.focus();
+        suppressOpen = false;
     }
 
-    async function addCurrent(): Promise<void> {
+    // Resolve a typed author name against the same list the picker shows: an exact
+    // (case-insensitive) name, else a substring that matches exactly one author. Any
+    // other outcome is ambiguous, and guessing would filter by the wrong artist.
+    async function resolveAuthor(name: string): Promise<FilterOption | null> {
+        const opts = await ensureOptions('author');
+        const lower = name.toLowerCase();
+        const exact = opts.find((o) => o.label.toLowerCase() === lower);
+        if (exact) return exact;
+        const near = opts.filter((o) => o.label.toLowerCase().includes(lower));
+        return near.length === 1 ? near[0] : null;
+    }
+
+    // Stage the typed value as a chip. Returns false when it couldn't be staged (an
+    // author name that resolves to nothing) so a caller about to navigate can stop
+    // instead of silently searching without the filter the user just typed.
+    async function addCurrent(): Promise<boolean> {
         const type = typeSel.value;
         const raw = valueInput.value.trim();
-        if (!raw) return;
+        if (!raw) return true;
+        // Each kind appends; re-adding one you already have is a no-op rather than a
+        // duplicate chip that filters for the same thing twice.
         if (type === 'title') {
-            filter.titleText = raw;
+            if (!filter.titleTexts.includes(raw)) filter.titleTexts.push(raw);
         } else if (type === 'tag') {
             const t = raw.toLowerCase();
             if (!filter.tags.includes(t)) filter.tags.push(t);
         } else if (type === 'author') {
-            const id = await resolveAuthorId(raw);
-            if (!id) { toast('No author matches “' + raw + '”', 'err'); return; }
-            filter.authorId = String(id);
-            filter.authorName = lastAuthorName || raw;
-            authorNames[filter.authorId] = filter.authorName;
+            const hit = await resolveAuthor(raw);
+            if (!hit) { toast('No author matches “' + raw + '”', 'err'); return false; }
+            authorNames[hit.value] = hit.label;
+            if (!filter.authorIds.includes(hit.value)) filter.authorIds.push(hit.value);
         }
         valueInput.value = '';
-        datalist.innerHTML = '';
         renderChips();
+        renderOptions();
+        return true;
     }
-    addBtn.addEventListener('click', () => { addCurrent(); });
+    // Add stages a chip without searching, so several filters can be composed into one
+    // query; Enter is the impatient path — stage it and run the search immediately.
+    // Either way the chip joins the existing ones; neither replaces the filter set.
+    addBtn.addEventListener('click', async () => { await addCurrent(); valueInput.focus(); });
     valueInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); addCurrent(); }
+        const open = !optionsEl.hidden;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!open) { void openOptions(); return; }
+            if (!shown.length) return;
+            const last = Math.min(shown.length, MAX_ROWS) - 1;
+            if (e.key === 'ArrowDown') setActive(activeIdx >= last ? 0 : activeIdx + 1);
+            else setActive(activeIdx <= 0 ? last : activeIdx - 1);
+            return;
+        }
+        if (e.key === 'Escape' && open) { e.preventDefault(); closeOptions(); return; }
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            // Enter takes the highlighted option if the user has arrowed to one;
+            // otherwise it means "search with what I typed", as before.
+            if (open && activeIdx >= 0 && shown[activeIdx]) { togglePick(shown[activeIdx]); return; }
+            closeOptions();
+            commit(true);
+        }
     });
 
-    async function commit(): Promise<void> {
-        if (valueInput.value.trim()) await addCurrent();
+    // fromInput marks the Enter path, where the caret should survive the re-render.
+    // The other callers are the sort/source/shuffle controls — stealing focus into the
+    // text field after one of those would be wrong.
+    async function commit(fromInput = false): Promise<void> {
+        if (valueInput.value.trim() && !(await addCurrent())) return;
+        builderRefocus = fromInput;
         navigateToFilter(filter);
     }
     runBtn.addEventListener('click', () => { commit(); });
+    // Saves the chips as shown — including any staged but not yet searched.
+    const saveBtn = builder.querySelector('.builder-save') as HTMLButtonElement;
+    saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        await saveSearch(filter);
+        saveBtn.disabled = false;
+    });
     // Picking an explicit sort exits shuffle (drop the seed so it leaves the URL).
     sortSel.addEventListener('change', () => { filter.sort = sortSel.value; filter.seed = ''; commit(); });
     // The source picker is absent when the library has only one bucket to show.
@@ -620,6 +909,8 @@ function wireBuilder(filter: Filter): void {
         filter.seed = newSeed();
         commit();
     });
+
+    return () => document.removeEventListener('mousedown', onDocDown);
 }
 
 // ───── reader view ────────────────────────────────────────────────
@@ -633,19 +924,22 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
     // Page mode's contents grid: a large thumbnail per page; clicking one opens the viewer.
     const grid = d.pages.map((p, i) =>
         `<button class="pg-thumb" type="button" data-idx="${i}" aria-label="Read from page ${i + 1}"><img loading="lazy" src="${thumbURL(p, 320)}" alt="page ${i + 1}"><span class="pg-num">${i + 1}</span></button>`).join('');
-    // Top toggle bar: switch scroll ⇄ page, and (page mode) whole-page ⇄ fit-width.
-    const modeBar = d.pages.length
-        ? `<div class="reader-modes" role="group" aria-label="Reader mode">
-             <div class="seg reader-mode-seg">
-               <button type="button" class="seg-btn" data-mode="scroll" aria-pressed="${mode === 'scroll'}">Scroll</button>
-               <button type="button" class="seg-btn" data-mode="page" aria-pressed="${mode === 'page'}">Page</button>
-             </div>
-             <div class="seg reader-fit-seg"${mode === 'page' ? '' : ' hidden'}>
-               <button type="button" class="seg-btn" data-fit="whole" aria-pressed="${!fitWidth}">Whole</button>
-               <button type="button" class="seg-btn" data-fit="width" aria-pressed="${fitWidth}">Width</button>
-             </div>
+    // Top toolbar: switch scroll ⇄ page, and (page mode) whole-page ⇄ fit-width. Saving
+    // lives here too, on the right — "save this" meant something different on every view
+    // when it sat in the app bar, so each scope now owns its own button and says so.
+    const segs = d.pages.length
+        ? `<div class="seg reader-mode-seg">
+             <button type="button" class="seg-btn" data-mode="scroll" aria-pressed="${mode === 'scroll'}">Scroll</button>
+             <button type="button" class="seg-btn" data-mode="page" aria-pressed="${mode === 'page'}">Page</button>
+           </div>
+           <div class="seg reader-fit-seg"${mode === 'page' ? '' : ' hidden'}>
+             <button type="button" class="seg-btn" data-fit="whole" aria-pressed="${!fitWidth}">Whole</button>
+             <button type="button" class="seg-btn" data-fit="width" aria-pressed="${fitWidth}">Width</button>
            </div>`
         : '';
+    const modeBar = `<div class="reader-modes" role="group" aria-label="Reader controls">${segs}
+        <button type="button" class="btn reader-save" title="Save this title, at the page you're on">${BOOKMARK_SVG}Save title</button>
+    </div>`;
     const counter = d.pages.length
         ? `<div class="reader-counter" data-total="${d.pages.length}"><span class="cur">1</span><span class="sep">/</span><span class="tot">${d.pages.length}</span></div>
            <aside class="reader-help"><kbd>←</kbd><kbd>→</kbd> page · <kbd>F</kbd> fit · <kbd>⌫</kbd> back</aside>`
@@ -730,6 +1024,15 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
         : '← Back to results';
     viewEl().innerHTML = readerMarkup(detail, backHref, backLabel);
 
+    // Save this title for later. saveCurrentPage reads the live reader page, so the
+    // saved entry resumes where you stopped rather than at page 1.
+    const saveBtn = viewEl().querySelector('.reader-save') as HTMLButtonElement | null;
+    saveBtn?.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        await saveCurrentPage();
+        saveBtn.disabled = false;
+    });
+
     // A missing title can be removed from the library here (its folder is gone); files
     // are never touched, so a present folder would just be re-offered for import.
     const removeBtn = viewEl().querySelector('[data-remove-manga]') as HTMLButtonElement | null;
@@ -763,7 +1066,7 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
     let mode = getReaderMode();
     let fitWidth = getReaderFitWidth();
 
-    // Track the open title so the header save button can stash it with its live page.
+    // Track the open title so "Save title" can stash it with its live page.
     readerState = { id, title: displayTitle(detail.manga), page: 0 };
 
     const clampIdx = (i: number) => Math.max(0, Math.min(d.pages.length - 1, i));
@@ -778,7 +1081,7 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
         });
     };
     // Commit a page as "current": update the counter, remember it on readerState (for the
-    // header save button), preload ahead, and debounce-persist it for a saved title tab.
+    // "Save title"), preload ahead, and debounce-persist it for a saved title tab.
     // Shared by the scroll observer and the fullscreen viewer so both track progress alike.
     const commitProgress = (idx: number) => {
         if (readerState) readerState.page = idx;
@@ -1038,6 +1341,7 @@ async function renderReader(id: number, stashId?: number): Promise<void> {
         readerState = null;
         delete document.body.dataset.fit;
         delete document.body.dataset.reader;
+        document.body.removeAttribute('data-reader-edit');
     };
 }
 
@@ -1112,7 +1416,20 @@ function wireTagEditor(id: number, initial: Typed[]): void {
     const subjectSel = block.querySelector('.tag-subject-select') as HTMLSelectElement;
     const chips = block.querySelector('.tag-edit-chips') as HTMLElement;
     const row = block.querySelector('#tagrow') as HTMLElement;
+    const actions = block.querySelector('.tag-actions') as HTMLElement;
     const datalist = block.querySelector('#tag-suggest') as HTMLDataListElement;
+
+    // Opening an editor panel takes the header over: hide the read-only tag row (the
+    // editor already lists the same tags, as chips) and — via a body flag — the reader's
+    // fixed counter/help/resume chrome, which would otherwise hover over the work.
+    const nhPanelEl = block.querySelector('.nh-panel') as HTMLElement | null;
+    const syncEditorChrome = () => {
+        const editing = !form.hidden;
+        const panelOpen = !!nhPanelEl && !nhPanelEl.hidden;
+        row.hidden = editing;
+        actions.hidden = editing;
+        document.body.toggleAttribute('data-reader-edit', editing || panelOpen);
+    };
 
     // savedTags mirrors what is persisted (and shown in the read-only row); working is
     // the editor's in-progress copy, identified by name only (matching the backend's
@@ -1156,9 +1473,14 @@ function wireTagEditor(id: number, initial: Typed[]): void {
         renderChips();
         form.hidden = false;
         toggle.hidden = true;
+        syncEditorChrome();
         input.focus();
     });
-    cancel.addEventListener('click', () => { form.hidden = true; toggle.hidden = false; });
+    cancel.addEventListener('click', () => {
+        form.hidden = true;
+        toggle.hidden = false;
+        syncEditorChrome();
+    });
 
     // Enter / comma commit the typed buffer as chip(s) without submitting the form (only
     // the Save button submits).
@@ -1203,6 +1525,7 @@ function wireTagEditor(id: number, initial: Typed[]): void {
             renderTags(saved);
             form.hidden = true;
             toggle.hidden = false;
+            syncEditorChrome();
             toast('Tags saved');
         } catch (err) {
             console.error(err);
@@ -1229,8 +1552,10 @@ function wireTagEditor(id: number, initial: Typed[]): void {
                     renderTags(saved);
                     nhPanel.hidden = true;
                     nhPanel.innerHTML = '';
+                    syncEditorChrome();
                 }));
                 nhPanel.hidden = false;
+                syncEditorChrome();
             } catch (err) {
                 console.error(err);
                 toast(nhErr(err), 'err');
@@ -1394,13 +1719,11 @@ function buildMatchPicker(
 
 // ───── stash view (saved pages / "tabs") ──────────────────────────
 // A short human label for a saved search, built from its filter params. Reused by
-// the header save button so the stash row reads like the active filter chips.
+// both save paths so the stash row reads like the active filter chips.
 function searchLabel(params: URLSearchParams): string {
     const parts: string[] = [];
-    const q = params.get('q');
-    if (q) parts.push(`“${q}”`);
-    const authorId = params.get('author');
-    if (authorId) parts.push('author: ' + (authorNames[authorId] || ('#' + authorId)));
+    params.getAll('q').filter(Boolean).forEach((q) => parts.push(`“${q}”`));
+    params.getAll('author').filter(Boolean).forEach((id) => parts.push('author: ' + (authorNames[id] || ('#' + id))));
     params.getAll('tag').filter(Boolean).forEach((t) => parts.push('#' + t));
     if (parts.length === 0) return 'All volumes';
     return parts.join(' · ');
@@ -1410,10 +1733,9 @@ function stashSearchCard(e: StashEntry): string {
     const qi = e.hash.indexOf('?');
     const params = new URLSearchParams(qi >= 0 ? e.hash.slice(qi + 1) : '');
     const chips: string[] = [];
-    const q = params.get('q');
-    if (q) chips.push(`<span class="chip">“${esc(q)}”</span>`);
-    const authorId = params.get('author');
-    if (authorId) chips.push(`<span class="chip">author: ${esc(authorNames[authorId] || ('#' + authorId))}</span>`);
+    params.getAll('q').filter(Boolean).forEach((q) => chips.push(`<span class="chip">“${esc(q)}”</span>`));
+    params.getAll('author').filter(Boolean).forEach((id) =>
+        chips.push(`<span class="chip">author: ${esc(authorNames[id] || ('#' + id))}</span>`));
     params.getAll('tag').filter(Boolean).forEach((t) => chips.push(`<span class="chip">#${esc(t)}</span>`));
     const body = chips.length ? chips.join(' ') : '<span class="stash-allvol">all volumes</span>';
     // The stored hash already lacks the leading '#'; prepend it for the link.
@@ -1422,7 +1744,7 @@ function stashSearchCard(e: StashEntry): string {
             <span class="stash-eyebrow">Search</span>
             <span class="stash-chips">${body}</span>
         </a>
-        <button type="button" class="stash-remove" data-id="${e.id}" aria-label="Remove from stash" title="Remove">×</button>
+        <button type="button" class="stash-remove" data-id="${e.id}" aria-label="Remove from saved stash" title="Remove">×</button>
     </div>`;
 }
 
@@ -1437,12 +1759,16 @@ function stashTitleCard(e: StashEntry): string {
             <div class="meta"><span class="t">${esc(e.title || e.label)}</span></div>
         </a>
         <span class="a">${esc(e.author_name)}</span>
-        <button type="button" class="stash-remove" data-id="${e.id}" aria-label="Remove from stash" title="Remove">×</button>
+        <button type="button" class="stash-remove" data-id="${e.id}" aria-label="Remove from saved stash" title="Remove">×</button>
     </div>`;
 }
 
+// Each save button belongs to what it saves, so the empty state names them by view
+// rather than pointing at one do-everything button.
 function stashEmptyHtml(): string {
-    return `<p class="empty">Nothing stashed yet. Use the <span class="inline-ico">▮</span> bookmark button to save a search or a title for later.</p>`;
+    return `<p class="empty">Nothing saved yet. <span class="inline-ico">${BOOKMARK_SVG}</span>
+        <em>Save search</em> keeps the filters you've built, <em>Save title</em> keeps your place
+        in a title, and the bookmark on a card saves that title straight from the grid.</p>`;
 }
 
 async function renderStash(): Promise<void> {
@@ -1452,15 +1778,17 @@ async function renderStash(): Promise<void> {
     const cards = entries.map((e) => (e.kind === 'title' && e.manga_id ? stashTitleCard(e) : stashSearchCard(e))).join('');
     viewEl().innerHTML = `
     <section class="hero">
-        <p class="eyebrow">The Stash</p>
+        <p class="eyebrow">Saved Stash</p>
         <h1 class="hero-title">${count} <span>saved page${count === 1 ? '' : 's'}</span></h1>
     </section>
     <div class="grid" id="stash-grid">${count ? cards : stashEmptyHtml()}</div>`;
 
     const grid = document.getElementById('stash-grid')!;
 
+    // Count cards, not [data-id] — the remove button carries a data-id of its own, so a
+    // bare attribute selector counts every entry twice.
     function refreshHero(): void {
-        const left = grid.querySelectorAll('[data-id]').length;
+        const left = grid.querySelectorAll('.stash-card').length;
         const h = viewEl().querySelector('.hero-title');
         if (h) h.innerHTML = `${left} <span>saved page${left === 1 ? '' : 's'}</span>`;
         if (left === 0) grid.innerHTML = stashEmptyHtml();
@@ -1479,11 +1807,17 @@ async function renderStash(): Promise<void> {
         if (!btn) return;
         e.preventDefault();
         const id = parseInt(btn.dataset.id!, 10);
+        // .stash-card, not [data-id]: the button itself has a data-id, so closest()
+        // would match the button and we'd fade out the × instead of the card.
+        const card = btn.closest('.stash-card') as HTMLElement | null;
         try {
             await StashRemove(id);
-            const card = btn.closest('[data-id]') as HTMLElement;
-            card.style.opacity = '0';
-            setTimeout(() => { card.remove(); refreshHero(); }, 200);
+            if (card) {
+                card.style.opacity = '0';
+                setTimeout(() => { card.remove(); refreshHero(); }, 200);
+            } else {
+                refreshHero();
+            }
         } catch (err) { console.error(err); toast("Couldn't remove", 'err'); }
     });
 
@@ -1494,30 +1828,31 @@ async function renderStash(): Promise<void> {
     viewCleanup = null;
 }
 
-// Save the current page (search or title) into the stash — the "save / clone / open
-// in new tab" primitive. Reads the live reader page when a title is open.
+// Save the current page (search or title) for later — the one save/clone primitive
+// behind every entry point. Reads the live reader page when a title is open.
 async function saveCurrentPage(): Promise<void> {
     const r = parseRoute();
+    const openStash = { label: 'Open stash', href: '#/stash' };
     try {
         if (r.name === 'reader' && readerState) {
             await StashSave({
                 kind: 'title', hash: `/manga/${readerState.id}`, label: readerState.title,
                 manga_id: readerState.id, page: readerState.page,
             });
-            toast('Title saved to stash');
+            toast('Title saved for later', 'ok', openStash);
         } else if (r.name === 'library') {
             const hash = location.hash.replace(/^#/, '') || '/';
             await StashSave({ kind: 'search', hash, label: searchLabel(r.params), manga_id: 0, page: 0 });
-            toast('Search saved to stash');
+            toast('Search saved for later', 'ok', openStash);
         } else {
-            toast('Nothing to stash on this screen', 'err');
+            toast('Nothing to save on this screen', 'err');
         }
-    } catch (e) { console.error(e); toast("Couldn't save to stash", 'err'); }
+    } catch (e) { console.error(e); toast("Couldn't save this page", 'err'); }
 }
 
 // ───── right-click context menu ───────────────────────────────────
-// Used for "open in new tab" on a title card and "save this page to stash" on blank
-// space. A single menu is open at a time; outside-click or Esc dismisses it.
+// Used for "save for later" on a title card and on blank space of a saveable view.
+// A single menu is open at a time; outside-click or Esc dismisses it.
 function onMenuKey(e: KeyboardEvent): void { if (e.key === 'Escape') closeCardMenu(); }
 function closeCardMenu(): void {
     document.querySelector('.card-menu')?.remove();
@@ -1588,14 +1923,15 @@ function scanMarkup(count: number, roots: string[], st: main.Settings, sources: 
             <button type="button" class="btn btn-danger" data-remove-missing>Remove missing</button></div>`
         : '';
     const settings = folderSettings + sourceSettings(st, sources) + maintenance;
+    // Same eyebrow + italic-numeral hero as Library and Stash, so the three top-level
+    // views read as one app. With nothing pending, the italic empty-state line below
+    // says it once — a "nothing new" count label on top of it said it twice.
     const header = `
-    <header class="scan-header">
-        <div>
-            <h1>Folders to ingest</h1>
-            <p class="count">${count ? count + ' found on disk' : 'nothing new'}</p>
-        </div>
-        ${count ? `<a class="import-all-link" href="#" data-import-all>Import all ${count} →</a>` : ''}
-    </header>`;
+    <section class="hero">
+        <p class="eyebrow">Ingest</p>
+        <h1 class="hero-title">${count} <span>folder${count === 1 ? '' : 's'} to ingest</span></h1>
+    </section>
+    ${count ? `<p class="scan-actions"><a class="import-all-link" href="#" data-import-all>Import all ${count} →</a></p>` : ''}`;
     const empty = count ? '' : `<p class="empty">Nothing new found. Drop folders into a library root and reload.</p>`;
     return settings + header + empty + `<div id="scan-list"></div>`;
 }
@@ -2040,14 +2376,12 @@ document.getElementById('rescan-btn')?.addEventListener('click', async () => {
     }
 });
 
-// Save-current-page button in the header (stash the current search or title).
-document.getElementById('stash-save-btn')?.addEventListener('click', () => { saveCurrentPage(); });
-
-// Right-click behaviour:
-//  • on a title card → "Open in new tab" (stash the title in the background so you
-//    keep your current view);
-//  • on blank space of a saveable view → "Save this page to stash" (the current
-//    search or title), mirroring the header bookmark button.
+// Right-click behaviour — the power-user shortcut for the same save-for-later action
+// the visible bookmark buttons perform:
+//  • on a title card → "Save for later" (saved in the background, so you keep the view
+//    you're on);
+//  • on blank space of a saveable view → save the current search or title, mirroring
+//    that view's own save button.
 document.addEventListener('contextmenu', (e) => {
     const main = (e.target as HTMLElement).closest('.card-main, .stash-card-main') as HTMLAnchorElement | null;
     const titleMatch = main && (main.getAttribute('href') || '').match(/#\/manga\/(\d+)/);
@@ -2056,13 +2390,8 @@ document.addEventListener('contextmenu', (e) => {
         const id = parseInt(titleMatch[1], 10);
         const title = (main.querySelector('.meta .t')?.textContent || 'Title').trim();
         showContextMenu(e.pageX, e.pageY, [{
-            label: 'Open in new tab',
-            run: async () => {
-                try {
-                    await StashSave({ kind: 'title', hash: `/manga/${id}`, label: title, manga_id: id, page: 0 });
-                    toast('Opened in new tab');
-                } catch (err) { console.error(err); toast("Couldn't stash title", 'err'); }
-            },
+            label: 'Save for later',
+            run: () => { void saveTitleForLater(id, title); },
         }]);
         return;
     }
@@ -2070,7 +2399,7 @@ document.addEventListener('contextmenu', (e) => {
     const r = parseRoute();
     if (r.name === 'library' || r.name === 'reader') {
         e.preventDefault();
-        const label = r.name === 'reader' ? 'Save this title to stash' : 'Save this search to stash';
+        const label = r.name === 'reader' ? 'Save this title for later' : 'Save this search for later';
         showContextMenu(e.pageX, e.pageY, [{ label, run: () => { saveCurrentPage(); } }]);
     }
 });

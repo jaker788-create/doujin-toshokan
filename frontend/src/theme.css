@@ -55,6 +55,11 @@
 
   --ease: cubic-bezier(.2, .8, .2, 1);
   --dur-1: 120ms; --dur-2: 240ms; --dur-3: 400ms;
+
+  /* App-bar height: the 36px icon buttons are the tallest thing in it, plus the
+     vertical padding and the bottom rule. Toasts hang off this so they clear the
+     header buttons instead of covering them. */
+  --header-h: calc(36px + 2 * var(--s-4) + 1px);
 }
 
 /* Reset, base */
@@ -90,8 +95,9 @@ main { position: relative; z-index: 1; padding: var(--s-6) var(--s-5); max-width
   border-radius: var(--r-1);
 }
 
-/* Header */
-header {
+/* Header (the app bar only — scoped to body's direct child so in-view <header>
+   elements like the reader's .title-header don't inherit the chrome flex row). */
+body > header {
   position: relative; z-index: 2;
   display: flex; align-items: center; gap: var(--s-5);
   padding: var(--s-4) var(--s-5);
@@ -159,9 +165,11 @@ header .nav-spacer { margin-left: auto; }
 }
 #filters input[type=search]::placeholder, .builder-value::placeholder { color: var(--paper-mute); font-style: italic; }
 #filters input[type=search]:focus, .builder-value:focus { border-color: var(--vermilion); box-shadow: 0 0 0 3px var(--vermilion-soft); outline: none; }
-/* Custom select skin. This is an explicit opt-in list, not `select` — a new select
-   renders as a raw native control until it is added here. */
-#filters select, .builder-type, .builder-sort, .builder-source {
+/* Custom select skin — applied to every <select> by default. It used to be an opt-in
+   class list, which meant each new select shipped as a raw native control until someone
+   remembered to add it here; every select in the app wants this look, so the default
+   is the skin and any exception opts *out*. */
+select {
   appearance: none;
   background: var(--ink-1) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' stroke='%23c9bfae' stroke-width='1.4' fill='none' stroke-linecap='round'/></svg>") no-repeat right var(--s-3) center;
   background-size: 10px;
@@ -202,6 +210,39 @@ header .nav-spacer { margin-left: auto; }
 /* Filter builder */
 .builder { margin-bottom: var(--s-4); }
 .builder-row { display: flex; gap: var(--s-3); align-items: stretch; flex-wrap: wrap; }
+/* Wraps the value input so the option panel can anchor to it. It takes over the
+   input's flex sizing; the input just fills it. */
+.builder-field { position: relative; flex: 1; min-width: 0; display: flex; }
+
+/* Option picker: what the library actually holds for the selected chip kind. A styled
+   panel rather than a native <datalist>, which renders as a light OS dropdown that
+   ignores the app's palette entirely — and which can't show counts or a picked state. */
+.builder-options {
+  position: absolute; top: calc(100% + var(--s-2)); left: 0; right: 0; z-index: 60;
+  max-height: 320px; overflow-y: auto;
+  background: var(--ink-1); border: 1px solid var(--rule-strong); border-radius: var(--r-2);
+  box-shadow: 0 24px 48px -20px rgba(0, 0, 0, .9);
+  padding: var(--s-2);
+}
+.builder-options[hidden] { display: none; }
+.opt {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-4);
+  width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 0; border-radius: var(--r-1);
+  padding: var(--s-2) var(--s-3); color: var(--paper-2);
+  font-family: var(--font-mono); font-size: var(--step--1);
+}
+.opt:hover, .opt.is-active { background: var(--vermilion-soft); color: var(--paper); }
+.opt.is-on { color: var(--vermilion); }
+/* A picked option keeps a marker so the lit row reads as "already a chip" rather than
+   as the row the cursor happens to be on. */
+.opt.is-on .opt-label::before { content: "✓ "; }
+.opt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opt-meta { flex: 0 0 auto; color: var(--paper-mute); font-size: var(--step--1); }
+.opt-note {
+  margin: 0; padding: var(--s-3);
+  font-family: var(--font-display); font-style: italic; color: var(--paper-mute);
+}
 .builder-foot { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin-top: var(--s-4); }
 .builder-chips { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; }
 .builder-chips:empty { display: none; }
@@ -215,6 +256,14 @@ header .nav-spacer { margin-left: auto; }
   background: var(--vermilion); color: var(--paper); border-color: var(--vermilion);
 }
 .builder-shuffle.is-on:hover { background: #b1432d; border-color: #b1432d; color: var(--paper); }
+/* "Save search" sits with the chips it saves rather than in the right-hand cluster of
+   controls that change them. Same bookmark as the card button, so the two read as one
+   action at two scopes. */
+.builder-save { display: inline-flex; align-items: center; }
+.builder-save svg {
+  width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6;
+  margin-right: var(--s-2);
+}
 .builder-sortwrap {
   display: inline-flex; align-items: center; gap: var(--s-2);
   font-family: var(--font-mono); font-size: var(--step--1);
@@ -261,7 +310,9 @@ header .nav-spacer { margin-left: auto; }
 }
 .card-main:hover .meta .t { text-decoration: underline; text-decoration-color: var(--vermilion); text-underline-offset: 3px; }
 .card .a {
-  display: block; text-decoration: none;
+  /* block for the ellipsis, but fit-content so the :focus-visible ring hugs the name
+     instead of spanning the whole column. */
+  display: block; width: fit-content; max-width: 100%; text-decoration: none;
   font-family: var(--font-mono); font-size: var(--step--1);
   letter-spacing: 0.02em; color: var(--paper-mute);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -392,6 +443,9 @@ header .nav-spacer { margin-left: auto; }
 .title-canonical[hidden] { display: none; }
 .title-edit-revert { margin-left: auto; }
 .tagrow { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: 0; padding: 0; }
+/* display:flex would otherwise beat the UA's [hidden] rule; the editor hides this row
+   while it's open so the same tags aren't listed twice in two different formats. */
+.tagrow[hidden] { display: none; }
 .tagrow a {
   display: inline-block; font-family: var(--font-mono); font-size: var(--step--1);
   letter-spacing: var(--tracking-wide); text-transform: uppercase;
@@ -425,17 +479,8 @@ header .nav-spacer { margin-left: auto; }
 .tag-edit-chips .chip { white-space: nowrap; }
 .tag-edit-chips .chip-x { background: none; border: none; padding: 0; cursor: pointer; }
 .tag-edit-row { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; width: 100%; }
-.tag-subject-select {
-  flex: 0 0 auto;
-  appearance: none;
-  background: var(--ink-1) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' stroke='%23c9bfae' stroke-width='1.4' fill='none' stroke-linecap='round'/></svg>") no-repeat right var(--s-3) center;
-  background-size: 10px;
-  border: 1px solid var(--rule-strong); border-radius: var(--r-2);
-  color: var(--paper); font-family: var(--font-mono); font-size: var(--step--1);
-  letter-spacing: var(--tracking-wide); text-transform: uppercase;
-  padding: var(--s-3) calc(var(--s-5) + var(--s-3)) var(--s-3) var(--s-4);
-  cursor: pointer;
-}
+/* Inherits the shared select skin; only the flex behaviour + focus ring are local. */
+.tag-subject-select { flex: 0 0 auto; }
 .tag-subject-select:focus { border-color: var(--vermilion); box-shadow: 0 0 0 3px var(--vermilion-soft); outline: none; }
 .notice {
   font-family: var(--font-mono); font-size: var(--step--1);
@@ -468,8 +513,11 @@ body[data-reader="grid"] .page-grid {
   display: grid; max-width: 1100px; margin: 0 auto;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--s-4);
 }
-/* Counter/help only make sense while reading, not on the contents grid. */
-body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help { display: none; }
+/* Counter/help only make sense while reading, not on the contents grid — and not while
+   an editor panel (tags / fetch-match picker) has the user's attention up in the header. */
+body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help,
+body[data-reader-edit] .reader-counter, body[data-reader-edit] .reader-help,
+body[data-reader-edit] .resume-pill { display: none; }
 .pg-thumb {
   position: relative; display: block; padding: 0; cursor: pointer;
   background: var(--ink-1); border: 1px solid var(--rule-strong); border-radius: var(--r-1);
@@ -545,6 +593,13 @@ body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help 
 .reader-modes .seg-btn + .seg-btn { border-left: 1px solid var(--rule); }
 .reader-modes .seg-btn:hover { color: var(--paper-2); }
 .reader-modes .seg-btn[aria-pressed="true"] { color: var(--vermilion); background: var(--vermilion-soft); }
+/* Save this title — right end of the toolbar, clear of the mode toggles it has nothing
+   to do with. It's the title-scoped twin of the library's "Save search". */
+.reader-save { margin-left: auto; display: inline-flex; align-items: center; }
+.reader-save svg {
+  width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6;
+  margin-right: var(--s-2);
+}
 
 /* Reader page counter (fixed) */
 .reader-counter {
@@ -616,7 +671,35 @@ body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help 
 }
 .stash-card:hover .stash-remove, .stash-remove:focus-visible { opacity: 1; }
 .stash-remove:hover { color: var(--vermilion); border-color: var(--vermilion); }
+/* Inline glyph in empty-state copy — the same outline bookmark the header button shows,
+   so "use the bookmark button" points at something the user can actually recognise. */
+/* Button names quoted in empty-state copy: mono + upright so they read as the labels
+   they are rather than as emphasis inside the italic sentence. */
+.empty em {
+  font-family: var(--font-mono); font-size: var(--step--1);
+  letter-spacing: var(--tracking-wide); text-transform: uppercase;
+  font-style: normal; color: var(--paper-2);
+}
 .empty .inline-ico { color: var(--vermilion); font-style: normal; }
+.empty .inline-ico svg {
+  width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6;
+  vertical-align: -3px;
+}
+
+/* Save-for-later button on a library card. Same hover-revealed overlay as .stash-remove,
+   so the two card affordances read as one pattern. */
+.card-stash {
+  position: absolute; top: var(--s-2); right: var(--s-2); z-index: 3;
+  width: 24px; height: 24px; padding: 0; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--ink-0); border: 1px solid var(--rule-strong); border-radius: var(--r-1);
+  color: var(--paper-2);
+  opacity: 0; transition: opacity var(--dur-1) var(--ease), color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.card:hover .card-stash, .card-stash:focus-visible { opacity: 1; }
+.card-stash:hover { color: var(--vermilion); border-color: var(--vermilion); }
+.card-stash.saved { opacity: 1; color: var(--vermilion); border-color: var(--vermilion); }
+.card-stash svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; }
 
 /* Resume pill (reader): like the help hint, but a clickable button. */
 .resume-pill {
@@ -632,7 +715,7 @@ body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help 
 .resume-pill.visible { opacity: 1; transform: translateY(0); }
 .resume-pill:hover { background: var(--vermilion-soft); }
 
-/* Card context menu ("open in new tab") */
+/* Card context menu ("save for later") */
 .card-menu {
   position: absolute; z-index: 120;
   background: var(--ink-1); border: 1px solid var(--rule-strong); border-radius: var(--r-2);
@@ -648,12 +731,9 @@ body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help 
 .card-menu button:hover { background: var(--vermilion-soft); color: var(--paper); }
 
 /* ───── Scan page ───── */
-.scan-header { margin-bottom: var(--s-6); display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-4); flex-wrap: wrap; }
-.scan-header h1 {
-  font-family: var(--font-display); font-weight: 600; font-size: var(--step-3);
-  margin: 0; letter-spacing: var(--tracking-tight); color: var(--paper);
-}
-.scan-header .count { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+/* Scan shares the Library/Stash hero (eyebrow + italic numeral) so all three top-level
+   views read as one app; the import-all action sits on its own row beneath it. */
+.scan-actions { margin: calc(-1 * var(--s-5)) 0 var(--s-6); }
 .import-all-link { font-family: var(--font-mono); font-size: var(--step--1); letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--vermilion); text-decoration: none; border: 1px solid var(--vermilion); padding: var(--s-2) var(--s-4); border-radius: var(--r-2); transition: background var(--dur-1) var(--ease); cursor: pointer; }
 .import-all-link:hover { background: var(--vermilion-soft); }
 
@@ -699,8 +779,11 @@ body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help 
 .settings .roots { color: var(--paper-2); }
 
 /* Toast */
+/* Below the app bar, not over it: toasts fire from the header's own buttons (rescan,
+   save for later), and landing on top of the control you just pressed hid the thing
+   the message was about. */
 #toast-region {
-  position: fixed; top: var(--s-5); right: var(--s-5); z-index: 200;
+  position: fixed; top: calc(var(--header-h) + var(--s-3)); right: var(--s-5); z-index: 200;
   display: flex; flex-direction: column; gap: var(--s-2);
   pointer-events: none;
 }
@@ -718,6 +801,8 @@ body[data-reader="grid"] .reader-counter, body[data-reader="grid"] .reader-help 
   min-width: 240px;
 }
 .toast.in { transform: translateX(0); opacity: 1; }
+.toast-action { color: var(--vermilion); text-decoration: none; border-bottom: 1px solid var(--vermilion); }
+.toast-action:hover { color: var(--paper); border-bottom-color: var(--paper); }
 .toast.toast-err { border-left-color: var(--danger); }
 
 /* Footer (kept tiny) */
@@ -729,7 +814,8 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 }
 @media (max-width: 640px) {
   main { padding: var(--s-4) var(--s-3); }
-  header { padding: var(--s-3) var(--s-4); gap: var(--s-3); }
+  body > header { padding: var(--s-3) var(--s-4); gap: var(--s-3); }
+  :root { --header-h: calc(36px + 2 * var(--s-3) + 1px); } /* keeps toasts under the shorter bar */
   header nav { margin-left: var(--s-2); gap: var(--s-3); }
   .hero { margin: var(--s-5) 0; }
   .hero-title { font-size: var(--step-3); }
@@ -742,6 +828,21 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
   .ingest-row .cover img { width: 100px; }
   .ingest-row .fields { grid-template-columns: 1fr; }
   .reader-help { left: var(--s-4); right: var(--s-4); transform: none; text-align: center; }
+}
+
+/* Touch: hover-revealed controls are unreachable without a pointer that can hover, so
+   any device with a touchscreen gets them shown permanently and sized for a fingertip.
+   `any-pointer` rather than `pointer` on purpose — a touchscreen laptop's *primary*
+   pointer is the trackpad, so `(hover: none)` would never match and the buttons would
+   stay hover-only on exactly the hybrid devices that need this. */
+@media (any-pointer: coarse) {
+  .stash-remove, .card-stash, .title-edit-toggle { opacity: 1; }
+  .stash-remove, .card-stash {
+    width: 32px; height: 32px;
+    top: var(--s-1); right: var(--s-1);
+  }
+  .card-stash svg { width: 16px; height: 16px; }
+  .stash-remove { font-size: var(--step-1); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -768,6 +869,7 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 
 /* Per-title fetch button + inline picker (in the reader's tags block) */
 .tag-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: var(--s-3); }
+.tag-actions[hidden] { display: none; }
 .nh-panel[hidden] { display: none; }
 .nh-panel { margin-top: var(--s-4); }
 .nh-picker { border: 1px solid var(--rule-strong); border-radius: var(--r-2); background: var(--ink-1); padding: var(--s-4); }

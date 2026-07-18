@@ -115,9 +115,12 @@ func isUniqueViolation(err error) bool {
 // SearchArgs are the optional browse/filter parameters. Tags are tag NAMES; they
 // are resolved to ids here, mirroring the Python /api/search route.
 type SearchArgs struct {
-	Q        string   `json:"q"`
-	AuthorID int64    `json:"author_id"`
-	Tags     []string `json:"tags"`
+	// Q and AuthorIDs are plural because the filter builder stacks chips of the same
+	// kind. Q terms AND together (each narrows); author ids OR (a title has one author,
+	// so requiring two would match nothing).
+	Q         []string `json:"q"`
+	AuthorIDs []int64  `json:"author_ids"`
+	Tags      []string `json:"tags"`
 	// Source filters by tag provenance: "" for any, search.SourceNone ("none") for
 	// titles that were never auto-tagged, or a provider slug ("nhentai", "hitomi", …).
 	Source string `json:"source"`
@@ -153,8 +156,8 @@ func (a *App) Search(args SearchArgs) ([]search.Manga, error) {
 		offset = 0
 	}
 	return search.SearchManga(a.db, search.SearchParams{
-		Query:      args.Q,
-		AuthorID:   args.AuthorID,
+		Queries:    args.Q,
+		AuthorIDs:  args.AuthorIDs,
 		TagIDs:     tagIDs,
 		SourceSlug: args.Source,
 		Sort:       args.Sort,
@@ -235,6 +238,14 @@ func (a *App) GetManga(id int64) (*MangaDetail, error) {
 	return &MangaDetail{Manga: *m, Pages: pages, Tags: tags, SourceLabel: label, Missing: missing}, nil
 }
 
+// FilterOptions lists everything the filter builder can filter by for one chip kind
+// ("tag", "author", "title"), most-used first, so clicking the field shows what the
+// library holds instead of requiring the user to guess a prefix. The full list is
+// returned and narrowed in the UI as they type.
+func (a *App) FilterOptions(kind string) ([]search.FilterOption, error) {
+	return search.ListFilterOptions(a.db, kind)
+}
+
 // SuggestTags returns tag-name completions for the filter builder.
 func (a *App) SuggestTags(q string) ([]string, error) {
 	return search.SuggestTags(a.db, q, 10)
@@ -244,11 +255,6 @@ func (a *App) SuggestTags(q string) ([]string, error) {
 // picking an existing tag can auto-fill its subject.
 func (a *App) SuggestTagsTyped(q string) ([]tag.Typed, error) {
 	return search.SuggestTagsTyped(a.db, q, 10)
-}
-
-// SuggestAuthors returns author {id,name} matches for the filter builder.
-func (a *App) SuggestAuthors(q string) ([]search.Author, error) {
-	return search.SuggestAuthors(a.db, q, 10)
 }
 
 // UpdateTags replaces a manga's tags and returns the saved set (with subjects,

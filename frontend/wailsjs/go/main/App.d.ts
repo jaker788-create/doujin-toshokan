@@ -21,6 +21,8 @@ export function CountMissing():Promise<number>;
 
 export function DeleteManga(arg1:number):Promise<void>;
 
+export function FilterOptions(arg1:string):Promise<Array<search.FilterOption>>;
+
 export function GetAuthor(arg1:number):Promise<search.Author>;
 
 export function GetConfig():Promise<config.Config>;
@@ -68,8 +70,6 @@ export function StashRemove(arg1:number):Promise<void>;
 export function StashSave(arg1:main.StashInput):Promise<number>;
 
 export function StashSetPage(arg1:number,arg2:number):Promise<void>;
-
-export function SuggestAuthors(arg1:string):Promise<Array<search.Author>>;
 
 export function SuggestTags(arg1:string):Promise<Array<string>>;
 
