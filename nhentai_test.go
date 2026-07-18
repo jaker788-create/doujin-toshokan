@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -249,6 +248,21 @@ func TestShortlistFlagsArtistAndParodyOverlap(t *testing.T) {
 	}
 }
 
+// wantQuery asserts one rung of the ladder by field. Since the refactor the ladder emits
+// neutral source.SearchQuery values rather than nhentai syntax, so these read the intent
+// directly (is the artist set? is this rung language-filtered?) instead of pattern-matching
+// a rendered string. The rendering itself is nhentai's business and is covered by
+// TestBuildQueryRendersNhentaiSyntax over in internal/nhentai.
+func wantQuery(t *testing.T, label string, got source.SearchQuery, artist, title, lang string) {
+	t.Helper()
+	if got.Artist != artist || got.Title != title || got.Language != lang {
+		t.Errorf("%s = %+v, want {Artist:%q Title:%q Language:%q}", label, got, artist, title, lang)
+	}
+	if got.Page != 1 {
+		t.Errorf("%s page = %d, want 1", label, got.Page)
+	}
+}
+
 // Free-text title runs first; the reliable fallback is the artist tag narrowed by the
 // first distinctive title word, then the bare artist catalog.
 func TestSearchRequestsTitleFirstThenArtistNarrowed(t *testing.T) {
@@ -256,15 +270,9 @@ func TestSearchRequestsTitleFirstThenArtistNarrowed(t *testing.T) {
 	if len(reqs) < 3 {
 		t.Fatalf("want at least 3 requests, got %+v", reqs)
 	}
-	if reqs[0].query != "A Little Sister's Warmth" || reqs[0].page != 1 {
-		t.Errorf("first = %+v, want the free-text title", reqs[0])
-	}
-	if reqs[1].query != `artist:"some artist" title:"little"` {
-		t.Errorf("second = %+v, want the artist tag narrowed by the first distinctive title word", reqs[1])
-	}
-	if reqs[2].query != `artist:"some artist"` {
-		t.Errorf("third = %+v, want the bare artist catalog", reqs[2])
-	}
+	wantQuery(t, "first (free-text title)", reqs[0], "", "A Little Sister's Warmth", "")
+	wantQuery(t, "second (artist narrowed by first title word)", reqs[1], "some artist", "little", "")
+	wantQuery(t, "third (bare artist catalog)", reqs[2], "some artist", "", "")
 }
 
 // A concrete language narrows the title free-text query, but NOT the artist-tag queries —
@@ -275,22 +283,25 @@ func TestSearchRequestsAppendLanguageFilter(t *testing.T) {
 	if len(reqs) < 3 {
 		t.Fatalf("want title + 2 artist requests, got %+v", reqs)
 	}
-	if reqs[0].query != "Some Title language:english" {
-		t.Errorf("free-text = %q, want the language filter appended", reqs[0].query)
-	}
-	if reqs[1].query != `artist:"some artist" title:"some"` {
-		t.Errorf("artist-narrowed = %q, want NO language filter (tag is constraint enough)", reqs[1].query)
-	}
-	if reqs[2].query != `artist:"some artist"` {
-		t.Errorf("bare artist = %q, want NO language filter", reqs[2].query)
-	}
+	wantQuery(t, "free-text", reqs[0], "", "Some Title", "english")
+	wantQuery(t, "artist-narrowed (must NOT be language-filtered)", reqs[1], "some artist", "some", "")
+	wantQuery(t, "bare artist (must NOT be language-filtered)", reqs[2], "some artist", "", "")
 }
 
 // With no artist there's no tag to lean on — just the free-text title(s).
 func TestSearchRequestsWithoutArtistIsFreeTextOnly(t *testing.T) {
 	reqs := searchRequests("", []string{"Some Title"}, nil, "")
-	if len(reqs) != 1 || reqs[0].query != "Some Title" {
+	if len(reqs) != 1 {
 		t.Fatalf("want a single free-text title request, got %+v", reqs)
+	}
+	wantQuery(t, "only request", reqs[0], "", "Some Title", "")
+}
+
+// A language alone is a filter, not a search — a query with nothing to search for would
+// match the site's entire catalog, so it must never be emitted.
+func TestSearchRequestsSkipsEmptyQueries(t *testing.T) {
+	if reqs := searchRequests("", []string{"", "   "}, []string{"  "}, "english"); len(reqs) != 0 {
+		t.Errorf("blank title/anchors produced %+v, want no requests", reqs)
 	}
 }
 
@@ -301,18 +312,10 @@ func TestSearchRequestsArtistQueriesPrecedeExtraVariants(t *testing.T) {
 	if len(reqs) < 4 {
 		t.Fatalf("want at least 4 requests, got %+v", reqs)
 	}
-	if reqs[0].query != "Romaji Title" {
-		t.Errorf("reqs[0] = %q, want the primary variant", reqs[0].query)
-	}
-	if reqs[1].query != `artist:"some artist" title:"romaji"` {
-		t.Errorf("reqs[1] = %q, want the artist-narrowed query", reqs[1].query)
-	}
-	if reqs[2].query != `artist:"some artist"` {
-		t.Errorf("reqs[2] = %q, want the bare artist catalog within budget", reqs[2].query)
-	}
-	if reqs[3].query != "English Subtitle" {
-		t.Errorf("reqs[3] = %q, want the secondary variant after the artist queries", reqs[3].query)
-	}
+	wantQuery(t, "reqs[0] (primary variant)", reqs[0], "", "Romaji Title", "")
+	wantQuery(t, "reqs[1] (artist-narrowed)", reqs[1], "some artist", "romaji", "")
+	wantQuery(t, "reqs[2] (bare artist catalog within budget)", reqs[2], "some artist", "", "")
+	wantQuery(t, "reqs[3] (secondary variant after the artist queries)", reqs[3], "", "English Subtitle", "")
 }
 
 func TestFirstTitleWordSkipsShortWords(t *testing.T) {
@@ -409,7 +412,7 @@ func TestGatherCandidatesCleanArtistHitsCatalog(t *testing.T) {
 	if _, _, err := app.gatherCandidates(context.Background(), run, mi, 10, ""); err != nil {
 		t.Fatal(err)
 	}
-	if countQueries(cs.searchCalls, `artist:"rustle"`) == 0 {
+	if countQueries(cs.searchCalls, artistCatalogQuery("rustle", "").CacheKey()) == 0 {
 		t.Errorf(`expected an artist:"rustle" catalog query, got %v`, cs.searchCalls)
 	}
 	for _, c := range cs.searchCalls {
@@ -422,9 +425,10 @@ func TestGatherCandidatesCleanArtistHitsCatalog(t *testing.T) {
 // Forced-english prefers the language-narrowed catalog (keeping a prolific artist under the
 // page cap); when it has results the all-language catalog is never fetched.
 func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
+	allLang := artistCatalogQuery("x", "").CacheKey()
 	cs := &stubSearcher{hits: map[string][]source.SearchResult{
-		`artist:"x" language:english`: {{ID: "6", EnglishTitle: "[Circle] EN Work"}},
-		`artist:"x"`:                  {{ID: "7"}}, // the all-language fallback — must stay unused
+		artistCatalogQuery("x", "english").CacheKey(): {{ID: "6", EnglishTitle: "[Circle] EN Work"}},
+		allLang: {{ID: "7"}}, // the all-language fallback — must stay unused
 	}}
 	run := newAutoTagRun(cs, "english", map[string]int{"x": 2})
 	app := &App{}
@@ -434,7 +438,7 @@ func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range cs.calls {
-		if c == `artist:"x"` {
+		if c == allLang {
 			t.Errorf("all-language catalog fetched despite the narrowed one having results")
 		}
 	}
@@ -447,8 +451,8 @@ func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
 // it falls back to the all-language catalog and finds the works (flagged artist-matched).
 func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
 	cs := &stubSearcher{hits: map[string][]source.SearchResult{
-		`artist:"x"`: {{ID: "5", EnglishTitle: "[Circle] JP-only Work"}},
-		// no `artist:"x" language:english` entry -> the narrowed query returns nothing
+		artistCatalogQuery("x", "").CacheKey(): {{ID: "5", EnglishTitle: "[Circle] JP-only Work"}},
+		// no english-narrowed entry -> that query returns nothing, forcing the fallback
 	}}
 	run := newAutoTagRun(cs, "english", map[string]int{"x": 2})
 	app := &App{}
@@ -483,8 +487,9 @@ type countingSearcher struct {
 
 func (c *countingSearcher) Slug() string { return "nhentai" }
 
-func (c *countingSearcher) Search(_ context.Context, query string, page int) (*source.SearchResponse, error) {
-	c.searchCalls = append(c.searchCalls, fmt.Sprintf("%s#%d", query, page))
+func (c *countingSearcher) Search(_ context.Context, query source.SearchQuery) (*source.SearchResponse, error) {
+	c.searchCalls = append(c.searchCalls, query.PageCacheKey())
+	page := query.Page
 	np := c.numPages
 	if np < 1 {
 		np = 1
@@ -518,7 +523,7 @@ func countQueries(calls []string, prefix string) int {
 func TestCatalogPagesThroughAndCaps(t *testing.T) {
 	cs := &countingSearcher{numPages: 12, perPage: 2}
 	run := newAutoTagRun(cs, "auto", nil)
-	results, truncated, err := run.catalog(context.Background(), `artist:"x"`)
+	results, truncated, err := run.catalog(context.Background(), artistCatalogQuery("x", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +537,7 @@ func TestCatalogPagesThroughAndCaps(t *testing.T) {
 		t.Errorf("got %d results, want %d", len(results), maxCatalogPages*cs.perPage)
 	}
 	before := len(cs.searchCalls)
-	if _, _, err := run.catalog(context.Background(), `artist:"x"`); err != nil {
+	if _, _, err := run.catalog(context.Background(), artistCatalogQuery("x", "")); err != nil {
 		t.Fatal(err)
 	}
 	if len(cs.searchCalls) != before {
@@ -545,7 +550,7 @@ func TestCatalogPagesThroughAndCaps(t *testing.T) {
 func TestCatalogStopsAtNumPages(t *testing.T) {
 	cs := &countingSearcher{numPages: 2, perPage: 3}
 	run := newAutoTagRun(cs, "auto", nil)
-	results, truncated, err := run.catalog(context.Background(), `artist:"x"`)
+	results, truncated, err := run.catalog(context.Background(), artistCatalogQuery("x", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +571,7 @@ func TestSearchPageAndDetailCached(t *testing.T) {
 	run := newAutoTagRun(cs, "auto", nil)
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
-		if _, err := run.searchPage(ctx, "q", 1); err != nil {
+		if _, err := run.searchPage(ctx, source.SearchQuery{Title: "q", Page: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -597,7 +602,7 @@ func TestGatherCatalogFirstSharedAcrossSiblings(t *testing.T) {
 	if _, _, err := app.gatherCandidates(context.Background(), run, mi2, 10, ""); err != nil {
 		t.Fatal(err)
 	}
-	if got := countQueries(cs.searchCalls, `artist:"x"#`); got != 2 {
+	if got := countQueries(cs.searchCalls, artistCatalogQuery("x", "").CacheKey()+"#"); got != 2 {
 		t.Errorf("artist catalog fetched %d pages across 2 siblings, want 2 (one page-through, cached)", got)
 	}
 }
@@ -617,7 +622,7 @@ func TestGatherSingletonStaysTitleFirst(t *testing.T) {
 			t.Errorf("singleton artist should not page the catalog; saw %q", c)
 		}
 	}
-	if got := countQueries(cs.searchCalls, "Solo Title#"); got != 1 {
+	if got := countQueries(cs.searchCalls, source.SearchQuery{Title: "Solo Title"}.CacheKey()+"#"); got != 1 {
 		t.Errorf("want the title free-text searched once, calls=%v", cs.searchCalls)
 	}
 }
@@ -655,10 +660,14 @@ type stubSearcher struct {
 
 func (s *stubSearcher) Slug() string { return "nhentai" }
 
-func (s *stubSearcher) Search(_ context.Context, query string, _ int) (*source.SearchResponse, error) {
-	s.calls = append(s.calls, query)
-	res := s.hits[query]
-	return &source.SearchResponse{Result: res, NumPages: 1}, nil
+// Search keys hits by the query's canonical CacheKey. Note an unknown key returns nil,
+// which gatherCandidates reads as "this catalog is empty" — that is precisely the signal
+// the catalog-fallback tests below rely on, so their map keys are built through
+// SearchQuery.CacheKey() rather than hand-written strings that could silently drift.
+func (s *stubSearcher) Search(_ context.Context, query source.SearchQuery) (*source.SearchResponse, error) {
+	k := query.CacheKey()
+	s.calls = append(s.calls, k)
+	return &source.SearchResponse{Result: s.hits[k], NumPages: 1}, nil
 }
 
 func (s *stubSearcher) GalleryByID(_ context.Context, id string) (*source.GalleryDetail, error) {
@@ -680,7 +689,7 @@ func TestArtistTagVariants(t *testing.T) {
 // word form ("50 percent off"), and those results are flagged artist-matched.
 func TestGatherCatalogNormalizedArtistFallback(t *testing.T) {
 	cs := &stubSearcher{hits: map[string][]source.SearchResult{
-		`artist:"50 percent off"`: {{ID: "7", EnglishTitle: "[50% OFF] Best Friend"}},
+		artistCatalogQuery("50 percent off", "").CacheKey(): {{ID: "7", EnglishTitle: "[50% OFF] Best Friend"}},
 	}}
 	run := newAutoTagRun(cs, "auto", map[string]int{"50% off": 2})
 	app := &App{}
@@ -718,18 +727,44 @@ func TestCatalogLanguageResolution(t *testing.T) {
 	}
 }
 
-func TestWithLangAndArtistCatalogQuery(t *testing.T) {
-	if got := withLang("foo", ""); got != "foo" {
-		t.Errorf(`withLang("foo","") = %q, want "foo"`, got)
+// artistCatalogQuery constrains by artist and nothing else, optionally language-narrowed.
+// It asserts fields, not a rendered string: how an artist constraint reaches the wire is
+// each provider's business (nhentai renders artist:"…", MangaDex resolves a UUID), and
+// nhentai's own rendering is covered by TestBuildQueryRendersNhentaiSyntax.
+func TestArtistCatalogQuery(t *testing.T) {
+	got := artistCatalogQuery("kinomoto anzu", "english")
+	if got.Artist != "kinomoto anzu" || got.Language != "english" || got.Title != "" {
+		t.Errorf("artistCatalogQuery = %+v, want artist+language only", got)
 	}
-	if got := withLang("foo", "english"); got != "foo language:english" {
-		t.Errorf("withLang concrete = %q", got)
+	if got := artistCatalogQuery("kinomoto anzu", ""); got.Language != "" || got.Artist != "kinomoto anzu" {
+		t.Errorf("artistCatalogQuery no-lang = %+v", got)
 	}
-	if got := artistCatalogQuery("kinomoto anzu", "english"); got != `artist:"kinomoto anzu" language:english` {
-		t.Errorf("artistCatalogQuery = %q", got)
+	// A catalog query has an artist, so it is never Empty even with no title.
+	if artistCatalogQuery("kinomoto anzu", "").Empty() {
+		t.Error("an artist-only catalog query must not count as empty")
 	}
-	if got := artistCatalogQuery("kinomoto anzu", ""); got != `artist:"kinomoto anzu"` {
-		t.Errorf("artistCatalogQuery no-lang = %q", got)
+}
+
+// The cache keys carry two invariants that would fail silently if broken. Case-insensitivity
+// keeps two spellings of one title from costing two searches (and two slots of the per-title
+// query budget). The unconditional "#<page>" suffix keeps a single-page fetch from ever
+// colliding with the page-less key a *complete* catalog page-through is stored under —
+// which would serve 25 results back as a whole artist catalog, with no truncation warning.
+func TestSearchQueryCacheKeys(t *testing.T) {
+	lower := source.SearchQuery{Artist: "Kinomoto Anzu", Title: "Best"}
+	upper := source.SearchQuery{Artist: "kinomoto anzu", Title: "best"}
+	if lower.CacheKey() != upper.CacheKey() {
+		t.Errorf("CacheKey is case-sensitive: %q vs %q", lower.CacheKey(), upper.CacheKey())
+	}
+	q := source.SearchQuery{Artist: "x"}
+	if q.PageCacheKey() == q.CacheKey() {
+		t.Errorf("page key %q collides with the catalog key %q", q.PageCacheKey(), q.CacheKey())
+	}
+	if page0 := (source.SearchQuery{Artist: "x", Page: 0}); page0.PageCacheKey() == page0.CacheKey() {
+		t.Errorf("a zero page must still be suffixed, got %q", page0.PageCacheKey())
+	}
+	if !(source.SearchQuery{Language: "english"}).Empty() {
+		t.Error("a language-only query must report Empty — it is a filter, not a search")
 	}
 }
 

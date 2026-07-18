@@ -5,36 +5,41 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"doujin/internal/source"
 	"doujin/internal/tag"
 )
+
+const authorBody = `{"data":[{"id":"aaaa-1111","type":"author","attributes":{"name":"Kinomoto Anzu"}}]}`
+
+// authorRouter serves /author and /manga separately, counting hits on each, so a test can
+// assert both what the /manga request carried and how many author lookups it took.
+func authorRouter(t *testing.T, authorJSON string) (*httptest.Server, *url.Values, *int32, *int32) {
+	t.Helper()
+	var mangaQuery url.Values
+	var authorHits, mangaHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/author") {
+			atomic.AddInt32(&authorHits, 1)
+			_, _ = w.Write([]byte(authorJSON))
+			return
+		}
+		atomic.AddInt32(&mangaHits, 1)
+		mangaQuery = r.URL.Query()
+		_, _ = w.Write([]byte(searchBody))
+	}))
+	return srv, &mangaQuery, &authorHits, &mangaHits
+}
 
 func testClient(srv *httptest.Server) *Client {
 	c := NewClient("TestAgent/1.0")
 	c.base = srv.URL
 	c.interval = time.Millisecond
 	return c
-}
-
-// parseQuery must translate the matcher's nhentai-style query syntax into a plain title
-// search plus an optional language name — MangaDex can't parse artist:/title:/language:.
-func TestParseQuery(t *testing.T) {
-	cases := []struct{ raw, wantText, wantLang string }{
-		{`Naruto`, "Naruto", ""},
-		{`Some Title language:english`, "Some Title", "english"},
-		{`artist:"kinomoto anzu" title:"best"`, "kinomoto anzu best", ""},
-		{`artist:"x"`, "x", ""},
-		{`artist:"x" title:"word" language:japanese`, "x word", "japanese"},
-	}
-	for _, c := range cases {
-		text, lang := parseQuery(c.raw)
-		if text != c.wantText || lang != c.wantLang {
-			t.Errorf("parseQuery(%q) = (%q, %q), want (%q, %q)", c.raw, text, lang, c.wantText, c.wantLang)
-		}
-	}
 }
 
 // mapTags implements "map what fits": author/artist -> Artist (deduped), originalLanguage
@@ -131,7 +136,7 @@ func TestSearchMapsResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := testClient(srv).Search(context.Background(), "Naruto", 1)
+	resp, err := testClient(srv).Search(context.Background(), source.SearchQuery{Title: "Naruto", Page: 1})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -181,7 +186,7 @@ func TestSearchLanguageFilterParamName(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := testClient(srv).Search(context.Background(), "Naruto language:english", 1); err != nil {
+	if _, err := testClient(srv).Search(context.Background(), source.SearchQuery{Title: "Naruto", Language: "english", Page: 1}); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if v := got["availableTranslatedLanguage[]"]; len(v) != 1 || v[0] != "en" {
@@ -189,6 +194,76 @@ func TestSearchLanguageFilterParamName(t *testing.T) {
 	}
 	if v := got["availableTranslatedLanguages[]"]; len(v) != 0 {
 		t.Errorf("plural availableTranslatedLanguages[] sent (%v) — MangaDex 400s on it", v)
+	}
+}
+
+// The headline of the structured-query refactor. MangaDex filters by author with a UUID
+// and rejects a name, so the old string contract folded the artist name into the title
+// instead — `title=kinomoto anzu best`, which returns zero results against the live API
+// because MangaDex titles never contain the author's name. The artist must now travel as
+// authorOrArtist=<uuid> and leave the title untouched.
+func TestSearchArtistDoesNotCorruptTitle(t *testing.T) {
+	srv, mangaQuery, _, _ := authorRouter(t, authorBody)
+	defer srv.Close()
+
+	q := source.SearchQuery{Artist: "kinomoto anzu", Title: "best", Page: 1}
+	if _, err := testClient(srv).Search(context.Background(), q); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := mangaQuery.Get("title"); got != "best" {
+		t.Errorf("title = %q, want %q — the artist name must not leak into the title", got, "best")
+	}
+	if got := mangaQuery.Get("authorOrArtist"); got != "aaaa-1111" {
+		t.Errorf("authorOrArtist = %q, want the resolved UUID", got)
+	}
+}
+
+// An artist MangaDex has never heard of, with no title to fall back on, must NOT become an
+// unconstrained /manga request — that would hand the matcher MangaDex's front page as
+// candidates. Search is best-effort, so the right answer is an empty response, not an error.
+func TestSearchUnknownArtistNoTitleReturnsEmpty(t *testing.T) {
+	srv, _, _, mangaHits := authorRouter(t, `{"data":[]}`)
+	defer srv.Close()
+
+	resp, err := testClient(srv).Search(context.Background(), source.SearchQuery{Artist: "nobody", Page: 1})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Result) != 0 {
+		t.Errorf("got %d results, want 0", len(resp.Result))
+	}
+	if n := atomic.LoadInt32(mangaHits); n != 0 {
+		t.Errorf("issued %d /manga requests, want 0 (nothing to filter on)", n)
+	}
+}
+
+// A sweep pages one artist's whole catalog, so the author lookup must be memoized: one
+// extra request per artist per run, not one per query.
+func TestAuthorLookupMemoized(t *testing.T) {
+	srv, _, authorHits, _ := authorRouter(t, authorBody)
+	defer srv.Close()
+
+	c := testClient(srv)
+	for i := 1; i <= 2; i++ {
+		if _, err := c.Search(context.Background(), source.SearchQuery{Artist: "kinomoto anzu", Page: i}); err != nil {
+			t.Fatalf("Search %d: %v", i, err)
+		}
+	}
+	if n := atomic.LoadInt32(authorHits); n != 1 {
+		t.Errorf("%d /author lookups for the same artist, want 1 (memoized)", n)
+	}
+}
+
+// A plain title search must cost no author lookup at all.
+func TestSearchPlainTitleSkipsAuthorLookup(t *testing.T) {
+	srv, _, authorHits, _ := authorRouter(t, authorBody)
+	defer srv.Close()
+
+	if _, err := testClient(srv).Search(context.Background(), source.SearchQuery{Title: "Naruto", Page: 1}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if n := atomic.LoadInt32(authorHits); n != 0 {
+		t.Errorf("issued %d /author lookups for an artist-less query, want 0", n)
 	}
 }
 
@@ -208,7 +283,7 @@ func TestRetriesOn429ThenSucceeds(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	resp, err := testClient(srv).Search(ctx, "naruto", 1)
+	resp, err := testClient(srv).Search(ctx, source.SearchQuery{Title: "naruto", Page: 1})
 	if err != nil {
 		t.Fatalf("Search after 429: %v", err)
 	}

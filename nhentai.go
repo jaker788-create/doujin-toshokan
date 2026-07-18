@@ -134,7 +134,7 @@ const truncatedNote = "artist catalog truncated at 10 pages — a deeper match m
 // clients satisfy it; tests inject a counting fake.
 type nhSearcher interface {
 	Slug() string
-	Search(ctx context.Context, query string, page int) (*source.SearchResponse, error)
+	Search(ctx context.Context, q source.SearchQuery) (*source.SearchResponse, error)
 	GalleryByID(ctx context.Context, id string) (*source.GalleryDetail, error)
 }
 
@@ -208,17 +208,9 @@ func catalogLanguage(langMode, localLang string) string {
 	}
 }
 
-// withLang appends the language: filter to a query when a concrete language resolves.
-func withLang(query, lang string) string {
-	if lang == "" {
-		return query
-	}
-	return query + " language:" + lang
-}
-
 // artistCatalogQuery is the artist-tag catalog search, optionally language-narrowed.
-func artistCatalogQuery(artist, lang string) string {
-	return withLang(`artist:"`+artist+`"`, lang)
+func artistCatalogQuery(artist, lang string) source.SearchQuery {
+	return source.SearchQuery{Artist: artist, Language: lang}
 }
 
 // artistTagVariants returns alternate spellings of an artist name to try when the exact
@@ -244,8 +236,9 @@ func artistTagVariants(artist string) []string {
 // maxCatalogPages) and caching the complete set so sibling titles reuse it with no further
 // network. A cached complete result is returned as-is. The bool reports the catalog had more
 // pages than the cap (a deeper work may be unseen).
-func (r *autoTagRun) catalog(ctx context.Context, query string) ([]source.SearchResult, bool, error) {
-	key := strings.ToLower(query)
+func (r *autoTagRun) catalog(ctx context.Context, query source.SearchQuery) ([]source.SearchResult, bool, error) {
+	// Page-less key: this entry stands for the *whole* catalog, not one page of it.
+	key := query.CacheKey()
 	if cs := r.searchCache[key]; cs != nil && cs.complete {
 		return cs.results, cs.truncated, nil
 	}
@@ -253,7 +246,8 @@ func (r *autoTagRun) catalog(ctx context.Context, query string) ([]source.Search
 	var acc []source.SearchResult
 	truncated := false
 	for page := 1; page <= maxCatalogPages; page++ {
-		resp, err := r.client.Search(ctx, query, page)
+		query.Page = page
+		resp, err := r.client.Search(ctx, query)
 		if err != nil {
 			return nil, false, err
 		}
@@ -276,15 +270,17 @@ func (r *autoTagRun) catalog(ctx context.Context, query string) ([]source.Search
 
 // searchPage fetches a single search page, cached by query+page. Used by the title-first
 // fallbacks; it never marks a cache entry complete (only catalog pages through).
-func (r *autoTagRun) searchPage(ctx context.Context, query string, page int) ([]source.SearchResult, error) {
-	if page < 1 {
-		page = 1
+func (r *autoTagRun) searchPage(ctx context.Context, query source.SearchQuery) ([]source.SearchResult, error) {
+	if query.Page < 1 {
+		query.Page = 1
 	}
-	key := fmt.Sprintf("%s#%d", strings.ToLower(query), page)
+	// The "#<page>" suffix is unconditional, so a single-page fetch can never be served
+	// back through catalog's page-less key as if it were a complete catalog.
+	key := query.PageCacheKey()
 	if cs := r.searchCache[key]; cs != nil {
 		return cs.results, nil
 	}
-	resp, err := r.client.Search(ctx, query, page)
+	resp, err := r.client.Search(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -306,12 +302,6 @@ func (r *autoTagRun) detail(ctx context.Context, id string) (*source.GalleryDeta
 	return d, nil
 }
 
-// searchRequest is one search call: a query plus a 1-based result page.
-type searchRequest struct {
-	query string
-	page  int
-}
-
 // searchRequests orders the searches to try. The primary title by free-text goes first —
 // for most titles the site matches it directly, and the caller verifies the artist on the
 // results. Then come the artist *tag* queries (narrowed by the first distinctive title
@@ -323,56 +313,63 @@ type searchRequest struct {
 // artist tag). When lang is set the *title/anchor* free-text queries are language-narrowed,
 // but the artist-tag queries are NOT — the tag is constraint enough, and a language filter
 // would only hide an artist whose works are in another language. De-duplicated; page 1.
-func searchRequests(artist string, variants, anchors []string, lang string) []searchRequest {
-	var reqs []searchRequest
+func searchRequests(artist string, variants, anchors []string, lang string) []source.SearchQuery {
+	var reqs []source.SearchQuery
 	seen := map[string]bool{}
-	add := func(q string, filtered bool) {
-		q = strings.TrimSpace(q)
-		if q == "" {
+	// add appends one query, de-duplicated case-insensitively on its full identity — the
+	// language included, since two rungs differing only by the filter are two searches.
+	// The empty check runs BEFORE the language is applied: a bare language filter is not a
+	// search, it matches a site's whole catalog.
+	add := func(q source.SearchQuery, filtered bool) {
+		q.Title = strings.TrimSpace(q.Title)
+		q.Artist = strings.TrimSpace(q.Artist)
+		if q.Empty() {
 			return
 		}
 		if filtered {
-			q = withLang(q, lang)
+			q.Language = lang
 		}
-		k := strings.ToLower(q)
-		if !seen[k] {
+		q.Page = 1
+		if k := q.CacheKey(); !seen[k] {
 			seen[k] = true
-			reqs = append(reqs, searchRequest{q, 1})
+			reqs = append(reqs, q)
 		}
 	}
 	if len(variants) > 0 {
-		add(variants[0], true)
+		add(source.SearchQuery{Title: variants[0]}, true)
 	}
 	if artist != "" {
-		aq := `artist:"` + artist + `"`
 		if len(variants) > 0 {
 			if w := firstTitleWord(variants[0]); w != "" {
-				add(aq+` title:"`+w+`"`, false)
+				add(source.SearchQuery{Artist: artist, Title: w}, false)
 			}
 		}
-		add(aq, false)
+		add(source.SearchQuery{Artist: artist}, false)
 	}
 	for i := 1; i < len(variants); i++ {
-		add(variants[i], true)
+		add(source.SearchQuery{Title: variants[i]}, true)
 	}
 	for _, a := range anchors {
-		add(a, true)
+		add(source.SearchQuery{Title: a}, true)
 	}
 	return reqs
 }
 
-// isArtistQuery reports whether a search query is constrained to the local artist's tag
-// (artist:"<artist>"…), so its results are that artist's by construction — letting the
-// title-first ladder flag artist matches even for galleries whose title omits the artist.
-func isArtistQuery(query, artist string) bool {
+// isArtistQuery reports whether a search query is constrained to the *local* artist, so
+// its results are that artist's by construction — letting the title-first ladder flag
+// artist matches even for galleries whose title omits the artist. Note it compares against
+// the local artist rather than merely asking "is any artist set": that equivalence holds
+// only while searchRequests is the sole producer of these queries, and collapsing it would
+// pre-break the multi-source routing in roadmap 2.2.
+func isArtistQuery(q source.SearchQuery, artist string) bool {
 	if artist == "" {
 		return false
 	}
-	return strings.HasPrefix(strings.ToLower(query), `artist:"`+artist+`"`)
+	return strings.EqualFold(strings.TrimSpace(q.Artist), artist)
 }
 
-// firstTitleWord returns the first distinctive word of a title for a title:"<word>"
-// narrowing filter: the first normalized token of length >= 2 (so one-letter stopwords
+// firstTitleWord returns the first distinctive word of a title, to narrow an artist-
+// constrained search: the first normalized token of length >= 2 (so one-letter stopwords
 // like "a"/"i" are skipped in favour of a word that actually narrows). "" when none.
 func firstTitleWord(s string) string {
 	for _, w := range strings.Fields(autotag.Normalize(s)) {
@@ -428,11 +425,11 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 		// tag then punctuation variants ("50% OFF" -> "50 percent off"). Language only narrows
 		// the fetch; it still ranks, and the chosen catalog's works are all artist-matched.
 		forms := append([]string{mi.artist}, artistTagVariants(mi.artist)...)
-		var attempts []string
+		var attempts []source.SearchQuery
 		attemptSeen := map[string]bool{}
-		addAttempt := func(q string) {
-			if !attemptSeen[q] {
-				attemptSeen[q] = true
+		addAttempt := func(q source.SearchQuery) {
+			if k := q.CacheKey(); !attemptSeen[k] {
+				attemptSeen[k] = true
 				attempts = append(attempts, q)
 			}
 		}
@@ -450,7 +447,7 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 			if cerr != nil {
 				return nil, false, cerr
 			}
-			note(q, len(res))
+			note(q.String(), len(res))
 			if len(res) > 0 {
 				results, truncated = res, trunc
 				break
@@ -468,11 +465,11 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 	// Per-title searches. After a catalog page-through the artist tag is exhausted, so the
 	// only useful fallback is the title by free-text (a work mis-tagged under a different
 	// artist on the site); otherwise run the full title-first ladder.
-	var reqs []searchRequest
+	var reqs []source.SearchQuery
 	if catalogFirst {
 		for _, v := range mi.variants {
 			if v = strings.TrimSpace(v); v != "" {
-				reqs = append(reqs, searchRequest{withLang(v, lang), 1})
+				reqs = append(reqs, source.SearchQuery{Title: v, Language: lang, Page: 1})
 			}
 		}
 	} else {
@@ -482,12 +479,12 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 		if i >= maxSearchQueries {
 			break
 		}
-		results, err := run.searchPage(ctx, rq.query, rq.page)
+		results, err := run.searchPage(ctx, rq)
 		if err != nil {
 			return nil, false, err
 		}
-		note(rq.query, len(results))
-		if isArtistQuery(rq.query, mi.artist) {
+		note(rq.String(), len(results))
+		if isArtistQuery(rq, mi.artist) {
 			for _, r := range results {
 				artistIDs[r.ID] = true
 			}

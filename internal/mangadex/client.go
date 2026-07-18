@@ -8,11 +8,14 @@
 // demographic → Category, genre/theme/content → Tag; parody/character/group have no
 // MangaDex equivalent and come back absent.
 //
-// The matcher (see the root tagging.go) emits nhentai-style query syntax
-// (artist:"x", title:"word", "… language:english"); MangaDex can't parse that, so
-// parseQuery translates it into a plain title search plus an optional language
-// filter. Page count is 0 (unknown) for every result — that is fine, the scorer
-// treats 0 as "no page signal" and leans on title + artist instead.
+// Searches arrive as a structured source.SearchQuery and are mapped onto MangaDex's
+// own filters: Title -> title=, Language -> availableTranslatedLanguage[], and Artist
+// -> authorOrArtist=<uuid> via a memoized /author?name= lookup, because MangaDex
+// filters by author with a UUID and rejects a name outright. Folding the artist name
+// into the title instead (which an earlier string-query contract forced) returned zero
+// results every time — MangaDex titles, unlike a doujin site's decorated ones, never
+// contain the author's name. Page count is 0 (unknown) for every result — that is fine,
+// the scorer treats 0 as "no page signal" and leans on title + artist instead.
 package mangadex
 
 import (
@@ -82,6 +85,12 @@ type Client struct {
 
 	mu      sync.Mutex
 	lastReq time.Time
+
+	// authorIDs memoizes artist name -> MangaDex author UUID for the life of the client
+	// (one sweep), so an artist's whole catalog costs a single /author lookup. A "" value
+	// is a real answer: MangaDex knows no author by that name.
+	authorMu  sync.Mutex
+	authorIDs map[string]string
 }
 
 // NewClient returns a client sending the given descriptive User-Agent. MangaDex needs
@@ -92,6 +101,7 @@ func NewClient(userAgent string) *Client {
 		base:      defaultBaseURL,
 		interval:  defaultInterval,
 		http:      &http.Client{Timeout: requestTimeout},
+		authorIDs: map[string]string{},
 	}
 }
 
@@ -130,6 +140,16 @@ type mdTag struct {
 	} `json:"attributes"`
 }
 
+// mdAuthorList is a GET /author?name= response — just enough to map a name to a UUID.
+type mdAuthorList struct {
+	Data []struct {
+		ID         string `json:"id"`
+		Attributes struct {
+			Name string `json:"name"`
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
 type mdRel struct {
 	ID         string `json:"id"`
 	Type       string `json:"type"`
@@ -141,17 +161,81 @@ type mdRel struct {
 
 // ── Provider methods ───────────────────────────────────────────────────────
 
-// Search runs a free-text title search. page is 1-based. The query may carry the
-// matcher's nhentai-style syntax, which parseQuery translates into a plain title
-// search plus a language filter.
-func (c *Client) Search(ctx context.Context, query string, page int) (*source.SearchResponse, error) {
+// authorID resolves an artist name to a MangaDex author UUID. MangaDex filters by author
+// with a UUID and never a name (authors[]=<name> is a 400 "must be at least 36 characters
+// long"), so an artist-anchored search needs this lookup first. Results are memoized per
+// client — including misses, which are a real answer — so a sweep over one artist's whole
+// catalog costs one lookup rather than one per query. A transport error is NOT memoized: a
+// transient failure must not poison the rest of the run. "" means no such author.
+func (c *Client) authorID(ctx context.Context, name string) (string, error) {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		return "", nil
+	}
+	c.authorMu.Lock()
+	id, ok := c.authorIDs[key]
+	c.authorMu.Unlock()
+	if ok {
+		return id, nil
+	}
+
+	q := url.Values{}
+	q.Set("name", name)
+	q.Set("limit", "5")
+	var out mdAuthorList
+	if err := c.do(ctx, "/author?"+q.Encode(), &out); err != nil {
+		return "", err
+	}
+	// Prefer an exact name match; otherwise take MangaDex's own best guess.
+	for _, a := range out.Data {
+		if strings.EqualFold(strings.TrimSpace(a.Attributes.Name), strings.TrimSpace(name)) {
+			id = a.ID
+			break
+		}
+	}
+	if id == "" && len(out.Data) > 0 {
+		id = out.Data[0].ID
+	}
+	c.authorMu.Lock()
+	c.authorIDs[key] = id
+	c.authorMu.Unlock()
+	return id, nil
+}
+
+// Search runs a structured search. sq.Page is 1-based. The artist is resolved to a
+// MangaDex author UUID and filtered with authorOrArtist (which matches either role — for
+// a doujin they are the same person); the title is a plain title filter. The artist name
+// is never folded into the title: MangaDex titles do not carry the author's name, so that
+// search reliably returns nothing.
+func (c *Client) Search(ctx context.Context, sq source.SearchQuery) (*source.SearchResponse, error) {
+	page := sq.Page
 	if page < 1 {
 		page = 1
 	}
-	title, lang := parseQuery(query)
+	title := strings.TrimSpace(sq.Title)
+	authorUUID := ""
+	if artist := strings.TrimSpace(sq.Artist); artist != "" {
+		id, err := c.authorID(ctx, artist)
+		if err != nil {
+			return nil, err
+		}
+		authorUUID = id
+	}
+	// Nothing left to filter on — an artist MangaDex has never heard of, and no title. An
+	// unconstrained /manga would hand the matcher MangaDex's front page as candidates, so
+	// return nothing instead. Search is best-effort (see the source package doc), and this
+	// reads as a clean "no match" in the sweep log rather than an error.
+	if title == "" && authorUUID == "" {
+		return &source.SearchResponse{Result: []source.SearchResult{}}, nil
+	}
 
 	q := url.Values{}
-	q.Set("title", title)
+	if title != "" {
+		q.Set("title", title)
+	}
+	if authorUUID != "" {
+		q.Set("authorOrArtist", authorUUID)
+	}
 	q.Set("limit", fmt.Sprintf("%d", searchLimit))
 	q.Set("offset", fmt.Sprintf("%d", (page-1)*searchLimit))
 	for _, r := range contentRatings {
@@ -164,7 +248,7 @@ func (c *Client) Search(ctx context.Context, query string, page int) (*source.Se
 	// availableTranslatedLanguages[]=en -> 400 "The property availableTranslatedLanguages
 	// is not defined and the definition does not allow additional properties". Do not
 	// "correct" this to the plural — TestSearchLanguageFilterParamName guards it.
-	if code := langNameToCode[lang]; code != "" {
+	if code := langNameToCode[strings.ToLower(strings.TrimSpace(sq.Language))]; code != "" {
 		q.Add("availableTranslatedLanguage[]", code)
 	}
 
@@ -323,34 +407,6 @@ func coverURL(m mdManga) string {
 		}
 	}
 	return ""
-}
-
-// parseQuery translates the matcher's nhentai-style query into a MangaDex title search
-// plus an optional language name. It pulls out a "language:<name>" token, strips the
-// artist:/title:/parody:/character: field markers (keeping their quoted values as search
-// words), and unquotes the rest — so `artist:"kinomoto anzu" title:"best"` becomes
-// ("kinomoto anzu best", "") and `Some Title language:english` becomes ("Some Title",
-// "english").
-func parseQuery(raw string) (text, lang string) {
-	var words []string
-	for _, f := range strings.Fields(raw) {
-		low := strings.ToLower(f)
-		if strings.HasPrefix(low, "language:") {
-			lang = strings.TrimPrefix(low, "language:")
-			continue
-		}
-		for _, field := range []string{"artist:", "title:", "parody:", "character:"} {
-			if strings.HasPrefix(low, field) {
-				f = f[len(field):]
-				break
-			}
-		}
-		f = strings.Trim(f, `"`)
-		if f != "" {
-			words = append(words, f)
-		}
-	}
-	return strings.Join(words, " "), lang
 }
 
 // ── transport ──────────────────────────────────────────────────────────────

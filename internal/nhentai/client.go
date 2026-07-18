@@ -134,15 +134,46 @@ func (c *Client) Label() string { return Label }
 // galleryURL builds the public gallery page URL for a gallery id.
 func galleryURL(id int64) string { return fmt.Sprintf("https://nhentai.net/g/%d/", id) }
 
-// Search runs a free-text gallery search. page is 1-based; values below 1 are
-// clamped to 1. The query supports nhentai's search syntax (quoted phrases,
-// artist:/pages: filters, etc.), but callers typically pass a plain title.
-func (c *Client) Search(ctx context.Context, query string, page int) (*source.SearchResponse, error) {
+// buildQuery renders a neutral source.SearchQuery into nhentai's own search syntax
+// (quoted phrases, artist:/title:/language: filters). This is the only place in the app
+// that speaks it — everything above internal/source describes what it wants instead.
+//
+// The shape follows what the site actually indexes. Free text only matches a gallery's
+// primary (romaji/japanese) title, so a query with no artist goes out as bare free text;
+// once an artist tag constrains the search, the title is sent as the title:"…" field
+// filter it should be. That rule is deliberate, not incidental — it is what lets one
+// struct reproduce both shapes the matcher's ladder emits.
+//
+// A language never rides alone: "language:english" with nothing to search for would match
+// every English gallery on the site, so an empty query stays empty.
+func buildQuery(q source.SearchQuery) string {
+	var parts []string
+	artist := strings.TrimSpace(q.Artist)
+	title := strings.TrimSpace(q.Title)
+	switch {
+	case artist != "":
+		parts = append(parts, `artist:"`+artist+`"`)
+		if title != "" {
+			parts = append(parts, `title:"`+title+`"`)
+		}
+	case title != "":
+		parts = append(parts, title)
+	}
+	if lang := strings.TrimSpace(q.Language); lang != "" && len(parts) > 0 {
+		parts = append(parts, "language:"+lang)
+	}
+	return strings.Join(parts, " ")
+}
+
+// Search runs a gallery search. sq.Page is 1-based; values below 1 are clamped to 1.
+// The neutral query is rendered into nhentai's own syntax by buildQuery.
+func (c *Client) Search(ctx context.Context, sq source.SearchQuery) (*source.SearchResponse, error) {
+	page := sq.Page
 	if page < 1 {
 		page = 1
 	}
 	q := url.Values{}
-	q.Set("query", query)
+	q.Set("query", buildQuery(sq))
 	q.Set("page", strconv.Itoa(page))
 	var out nhSearchResponse
 	if err := c.do(ctx, "/search?"+q.Encode(), &out); err != nil {
