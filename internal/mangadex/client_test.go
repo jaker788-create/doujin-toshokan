@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -165,6 +166,29 @@ func TestSearchMapsResults(t *testing.T) {
 	}
 	if subjects["masashi kishimoto"] != tag.Artist || subjects["action"] != tag.Tag {
 		t.Errorf("mapped tags wrong: %+v", g.Tags)
+	}
+}
+
+// The language filter must go out under MangaDex's SINGULAR parameter name. The plural
+// spelling is not merely ignored — it fails the whole request with a 400 ("The property
+// availableTranslatedLanguages is not defined and the definition does not allow additional
+// properties"), so every language-narrowed search errored out.
+func TestSearchLanguageFilterParamName(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(searchBody))
+	}))
+	defer srv.Close()
+
+	if _, err := testClient(srv).Search(context.Background(), "Naruto language:english", 1); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if v := got["availableTranslatedLanguage[]"]; len(v) != 1 || v[0] != "en" {
+		t.Errorf("availableTranslatedLanguage[] = %v, want [en]", v)
+	}
+	if v := got["availableTranslatedLanguages[]"]; len(v) != 0 {
+		t.Errorf("plural availableTranslatedLanguages[] sent (%v) — MangaDex 400s on it", v)
 	}
 }
 

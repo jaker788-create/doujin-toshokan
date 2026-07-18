@@ -160,8 +160,12 @@ func (c *Client) Search(ctx context.Context, query string, page int) (*source.Se
 	for _, inc := range []string{"author", "artist", "cover_art"} {
 		q.Add("includes[]", inc)
 	}
+	// NOTE the SINGULAR parameter name. MangaDex rejects the plural spelling outright:
+	// availableTranslatedLanguages[]=en -> 400 "The property availableTranslatedLanguages
+	// is not defined and the definition does not allow additional properties". Do not
+	// "correct" this to the plural — TestSearchLanguageFilterParamName guards it.
 	if code := langNameToCode[lang]; code != "" {
-		q.Add("availableTranslatedLanguages[]", code)
+		q.Add("availableTranslatedLanguage[]", code)
 	}
 
 	var out mdCollection
