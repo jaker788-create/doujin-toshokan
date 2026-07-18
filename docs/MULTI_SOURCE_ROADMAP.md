@@ -148,13 +148,19 @@ Two design points worth not re-litigating:
   is keyed by `SearchQuery.CacheKey()` and its `detailCache` by bare gallery id — both
   provider-scoped. nhentai and hitomi both use numeric ids, so a shared cache would serve
   one site's gallery for another's id. `TestChainCachesDoNotCollideAcrossProviders` pins it.
-- **Replace, not merge.** Candidates are never pooled across providers into one `Decide`
-  call: `gatherCandidates` dedupes by bare gallery id with no provider namespace,
-  `applyTags` stamps one slug for a whole merge set, and cross-provider scores are not
+- **Auto-applies never span providers; reviews pool.** A confident match ends the chain and
+  is applied whole, because `gatherCandidates` dedupes by bare gallery id with no provider
+  namespace and `applyTags` stamps one slug per merge set — a set drawn from two sites would
+  drop colliding ids and mis-record provenance. A *review* is different: nothing is being
+  applied yet, so every source that found candidates contributes to the shortlist
+  (`pooledReviewCandidates`), grouped by provider in chain order and capped at
+  `pooledReviewMax`. Groups are **never interleaved by score**: cross-provider scores are not
   comparable (MangaDex reports `NumPages: 0` for every series, so its candidates can never
-  earn the page bonus). That last point is also why two review-only providers **tie-break on
-  chain order, not score** — comparing them would be a bogus comparison dressed up as
-  intelligence.
+  earn the page bonus), and a merged sort would bury them every time. Chain order is honest;
+  a cross-provider ranking would be a fiction.
+  Provenance therefore rides **per candidate** (`SourceCandidate.SourceSlug`), not just per
+  result — a pooled list can hold the same numeric id from two sites, and applying must
+  resolve it against the right one.
 
 The active provider failing to build stays a **hard error** even with fallback on: sweeping
 quietly with the others would hide the misconfiguration. A non-active source that fails to

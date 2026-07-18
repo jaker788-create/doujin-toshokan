@@ -547,16 +547,29 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 	return score(), truncated, nil
 }
 
+// chainReview is one provider's non-confident result, kept so a review shortlist can pool
+// candidates from every source that found something.
+type chainReview struct {
+	run       *autoTagRun
+	dec       autotag.Decision
+	truncated bool
+}
+
 // chainMatch is the chain's verdict on one title: which run produced it and what it found.
 //
 // shortcut is non-nil when a folder-name gallery ref resolved directly, in which case dec
 // is unset — the ref is authoritative and never went through scoring. Otherwise dec holds
-// the winning provider's decision. Exactly one of the two is meaningful; callers branch on
-// shortcut first.
+// the winning provider's decision, and reviews holds every provider that returned
+// candidates without clearing the auto bar, in chain order.
+//
+// On an auto-apply, reviews is empty and dec is the single winning source's — applying
+// never spans providers. On a review, dec is the first contributing provider's (it decides
+// the outcome and the primary source) while reviews carries them all for the shortlist.
 type chainMatch struct {
 	run       *autoTagRun
 	shortcut  *source.GalleryDetail
 	dec       autotag.Decision
+	reviews   []chainReview
 	truncated bool
 	trace     string // per-title query trace across every provider consulted
 }
@@ -570,14 +583,21 @@ type chainMatch struct {
 // fetch instead of a doomed multi-query fuzzy search, and it is the only way an id-only
 // source (hitomi) can match at all.
 //
-// Then the fuzzy chain, in priority order, advancing on anything short of an auto-apply.
-// Results are NOT pooled across providers: each provider's decision is kept whole and one
-// is chosen. Pooling would be wrong three ways — gatherCandidates dedupes by bare gallery
-// id with no provider namespace, applyTags stamps one slug for a whole merge set, and
-// cross-provider scores are not comparable (MangaDex reports NumPages 0 for every series,
-// so its candidates can never earn the page bonus). For that last reason the tie-break
-// between two review-only providers is chain order, not score: comparing them would be a
-// bogus comparison dressed up as intelligence.
+// Then the fuzzy chain, in priority order, advancing on anything short of an auto-apply —
+// including a provider that returned nothing at all.
+//
+// An **auto-apply never spans providers**: the first source to clear the bar wins outright
+// and its decision is used whole. That is not squeamishness. gatherCandidates dedupes by
+// bare gallery id with no provider namespace, and applyTags stamps a single slug for a
+// whole merge set, so a merge set drawn from two sites would silently drop colliding ids
+// and mis-record where the tags came from.
+//
+// A **review pools across providers**: every source that found candidates contributes to
+// the shortlist (see pooledReviewCandidates), because nothing is being applied yet — the
+// user is choosing, and hiding the other sources' candidates just to keep one slug per
+// result would be withholding the answer. dec/run stay the first contributing provider's:
+// they decide the outcome and the primary source, and chain order is the only honest
+// ranking between providers whose scores are not comparable.
 func (a *App) matchThroughChain(ctx context.Context, chain *sourceChain, mi matchInput, pages int, localLang string) (chainMatch, error) {
 	// Phase 1: an exact ref in the folder name, routed to its own provider.
 	if mi.sourceRef != "" {
@@ -592,33 +612,44 @@ func (a *App) matchThroughChain(ctx context.Context, chain *sourceChain, mi matc
 	}
 
 	// Phase 2: the fuzzy chain.
-	var best chainMatch
+	var reviews []chainReview
 	var traces []string
 	for _, run := range chain.fuzzy {
 		scored, truncated, err := a.gatherCandidates(ctx, run, mi, pages, localLang)
 		if err != nil {
 			return chainMatch{}, err
 		}
-		trace := run.slug + ": " + strings.Join(run.trace, "  ")
-		traces = append(traces, trace)
+		traces = append(traces, run.slug+": "+strings.Join(run.trace, "  "))
 		dec := autotag.Decide(scored)
-		cm := chainMatch{run: run, dec: dec, truncated: truncated, trace: trace}
 		if dec.Action == autotag.ActionAuto {
-			cm.trace = strings.Join(traces, "  |  ")
-			return cm, nil
+			// A confident match ends the chain and is applied alone — see the doc comment
+			// on why an apply never spans providers.
+			return chainMatch{
+				run: run, dec: dec, truncated: truncated,
+				trace: strings.Join(traces, "  |  "),
+			}, nil
 		}
-		// Keep the FIRST provider that produced anything; later ones only get to win by
-		// clearing the auto bar outright.
-		if best.run == nil && len(dec.Ranked) > 0 {
-			best = cm
+		if len(dec.Ranked) > 0 {
+			reviews = append(reviews, chainReview{run: run, dec: dec, truncated: truncated})
 		}
 	}
-	if best.run == nil {
-		// Nothing anywhere: report against the primary so the outcome still names a source.
-		best = chainMatch{run: chain.primary()}
+
+	cm := chainMatch{reviews: reviews, trace: strings.Join(traces, "  |  ")}
+	if len(reviews) > 0 {
+		// The first contributing provider decides the outcome and the primary source; the
+		// rest still contribute candidates to the shortlist.
+		cm.run, cm.dec, cm.truncated = reviews[0].run, reviews[0].dec, reviews[0].truncated
+		// Any source hitting its catalog cap means a deeper match may exist somewhere.
+		for _, r := range reviews {
+			if r.truncated {
+				cm.truncated = true
+			}
+		}
+		return cm, nil
 	}
-	best.trace = strings.Join(traces, "  |  ")
-	return best, nil
+	// Nothing anywhere: report against the primary so the outcome still names a source.
+	cm.run = chain.primary()
+	return cm, nil
 }
 
 // confidentMatch reports whether some scored candidate is safe enough to stop searching:
@@ -708,7 +739,13 @@ func (a *App) SetNhentaiKey(key string) error {
 // ArtistMatch/ParodyMatch drive the why-match badges. Tags is populated only for
 // detail-fetched candidates (the merge set or the top few); it is nil otherwise to
 // avoid a detail fetch per candidate. GalleryID is the provider's string id.
+// SourceSlug/SourceLabel name the provider this candidate came from. A review shortlist
+// can pool candidates from several sources, so provenance has to ride per candidate and
+// not just per result: a gallery ref is only meaningful to the site that issued it, and
+// two sites can use the same numeric id.
 type SourceCandidate struct {
+	SourceSlug    string      `json:"source_slug"`
+	SourceLabel   string      `json:"source_label"`
 	GalleryID     string      `json:"gallery_id"`
 	MediaID       string      `json:"media_id"`
 	Thumbnail     string      `json:"thumbnail"`
@@ -828,32 +865,45 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 		res.Decision = "none"
 		return res, nil
 	}
-	// On review, show the artist's own works (closest first, capped); on auto, keep the
-	// full ranked list so the merge set stays visible for the one-click preview.
+	// On review, pool every source's artist-narrowed works (closest first within each,
+	// capped); on auto, keep the winning source's full ranked list so the merge set stays
+	// visible for the one-click preview.
 	if dec.Action == autotag.ActionAuto {
-		res.Candidates = shortlist(dec.Ranked, shortlistMax, mi)
+		res.Candidates = shortlist(dec.Ranked, shortlistMax, mi, run.slug)
 	} else {
-		res.Candidates = shortlist(reviewPool(dec.Ranked), reviewMax, mi)
+		res.Candidates = pooledReviewCandidates(cm.reviews, mi)
 	}
 
 	// Detail-fetch the candidates worth previewing: on auto, the merge set (so the UI
 	// previews the union it will apply); on review, the top few. Each fetch refines the
 	// candidate's tags + artist/parody overlap with authoritative detail data.
-	toFetch := map[string]bool{}
+	//
+	// Selection is by INDEX, not gallery id: a pooled shortlist can hold the same numeric
+	// id from two different sites, and each candidate must be fetched from its own
+	// provider's run.
+	fetch := make([]bool, len(res.Candidates))
 	if dec.Action == autotag.ActionAuto {
+		merge := map[string]bool{}
 		for _, gid := range res.MergeGalleryIDs {
-			toFetch[gid] = true
+			merge[gid] = true
+		}
+		for i := range res.Candidates {
+			fetch[i] = merge[res.Candidates[i].GalleryID]
 		}
 	} else {
 		for i := 0; i < len(res.Candidates) && i < previewCount; i++ {
-			toFetch[res.Candidates[i].GalleryID] = true
+			fetch[i] = true
 		}
 	}
 	for i := range res.Candidates {
-		if !toFetch[res.Candidates[i].GalleryID] {
+		if !fetch[i] {
 			continue
 		}
-		if d, derr := run.detail(a.ctx, res.Candidates[i].GalleryID); derr == nil {
+		cRun := chain.bySlug[res.Candidates[i].SourceSlug]
+		if cRun == nil {
+			continue
+		}
+		if d, derr := cRun.detail(a.ctx, res.Candidates[i].GalleryID); derr == nil {
 			res.Candidates[i].Tags = galleryTypedTags(d)
 			markOverlap(&res.Candidates[i], mi.artist, mi.parodies, d)
 		}
@@ -1089,13 +1139,38 @@ func reviewPool(ranked []autotag.Candidate) []autotag.Candidate {
 // shortlist turns the top n ranked candidates into UI candidates, flagging each whose
 // artist/parody overlaps the local title (from the candidate's own title decorations —
 // no detail fetch, so it works in the bulk sweep).
-func shortlist(ranked []autotag.Candidate, n int, mi matchInput) []SourceCandidate {
+func shortlist(ranked []autotag.Candidate, n int, mi matchInput, slug string) []SourceCandidate {
 	n = min(n, len(ranked))
 	out := make([]SourceCandidate, 0, n)
 	for i := range n {
 		c := toCandidate(ranked[i])
+		c.SourceSlug, c.SourceLabel = slug, providerLabel(slug)
 		markOverlap(&c, mi.artist, mi.parodies, nil)
 		out = append(out, c)
+	}
+	return out
+}
+
+// pooledReviewMax caps a pooled review shortlist. Each contributing source offers up to
+// reviewMax of its own (so a single-source review is unchanged), but a three-provider chain
+// dumping thirty rows onto one card helps nobody. Trimming happens at the tail, which
+// respects chain priority.
+const pooledReviewMax = 16
+
+// pooledReviewCandidates builds the review shortlist from every source that found
+// something, grouped by provider in chain order and ranked within each group.
+//
+// It deliberately does NOT interleave the groups by score. Scores are not comparable across
+// providers — MangaDex reports NumPages 0 for every series, so its candidates can never earn
+// the page bonus — and a merged sort would bury them under a doujin site's every time. Chain
+// order is an honest ordering; a cross-provider score ranking would be a fiction.
+func pooledReviewCandidates(reviews []chainReview, mi matchInput) []SourceCandidate {
+	var out []SourceCandidate
+	for _, r := range reviews {
+		out = append(out, shortlist(reviewPool(r.dec.Ranked), reviewMax, mi, r.run.slug)...)
+	}
+	if len(out) > pooledReviewMax {
+		out = out[:pooledReviewMax]
 	}
 	return out
 }
@@ -1392,7 +1467,7 @@ func (a *App) runAutoTag(ctx context.Context, chain *sourceChain, targets []auto
 			Decision:      "review",
 			SourceSlug:    run.slug,
 			SourceLabel:   providerLabel(run.slug),
-			Candidates:    shortlist(reviewPool(dec.Ranked), reviewMax, mi),
+			Candidates:    pooledReviewCandidates(cm.reviews, mi),
 		})
 		prog.Outcome = "review"
 		prog.Detail = reviewDetail(cm.trace, truncated)

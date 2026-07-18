@@ -120,6 +120,8 @@ export namespace main {
 		}
 	}
 	export class SourceCandidate {
+	    source_slug: string;
+	    source_label: string;
 	    gallery_id: string;
 	    media_id: string;
 	    thumbnail: string;
@@ -145,6 +147,8 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source_slug = source["source_slug"];
+	        this.source_label = source["source_label"];
 	        this.gallery_id = source["gallery_id"];
 	        this.media_id = source["media_id"];
 	        this.thumbnail = source["thumbnail"];

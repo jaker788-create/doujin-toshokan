@@ -8,9 +8,11 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
+	"doujin/internal/autotag"
 	"doujin/internal/source"
 )
 
@@ -218,6 +220,99 @@ func TestChainKeepsTheFirstReviewWhenNoneAutoApply(t *testing.T) {
 	// Both were still consulted — advancing on "review" is the whole point of the choice.
 	if second.searchCalls == 0 {
 		t.Error("the chain should still have tried the second source")
+	}
+}
+
+// A review pools candidates from EVERY source that found something. Keeping only the first
+// provider's would hide that another site had better options while claiming "no match" was
+// the whole story.
+func TestChainPoolsReviewCandidatesAcrossSources(t *testing.T) {
+	first := &chainStub{slug: "nhentai", results: []source.SearchResult{
+		hit("1", "Some Entirely Different Work", 99),
+	}}
+	second := &chainStub{slug: "mangadex", results: []source.SearchResult{
+		hit("2", "Some Other Unrelated Book", 98),
+		hit("3", "Some Further Unrelated Thing", 97),
+	}}
+	chain := buildChain(true, nil, first, second)
+
+	mi := chainInput("/lib/[Circle] Some Title")
+	cm, err := (&App{}).matchThroughChain(context.Background(), chain, mi, 20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cm.reviews) != 2 {
+		t.Fatalf("reviews = %d, want both sources represented", len(cm.reviews))
+	}
+	cands := pooledReviewCandidates(cm.reviews, mi)
+	bySlug := map[string]int{}
+	for _, c := range cands {
+		bySlug[c.SourceSlug]++
+		if c.SourceLabel == "" {
+			t.Errorf("candidate %+v has no source label", c)
+		}
+	}
+	if bySlug["nhentai"] == 0 || bySlug["mangadex"] == 0 {
+		t.Errorf("pooled candidates by source = %v, want both", bySlug)
+	}
+	// Grouped by provider in chain order, NOT interleaved by score: cross-provider scores
+	// are not comparable, so a merged sort would bury MangaDex every time.
+	if cands[0].SourceSlug != "nhentai" {
+		t.Errorf("first candidate came from %q, want the first source in the chain", cands[0].SourceSlug)
+	}
+	if last := cands[len(cands)-1]; last.SourceSlug != "mangadex" {
+		t.Errorf("last candidate came from %q, want the later source", last.SourceSlug)
+	}
+}
+
+// The pooled shortlist is capped so a long chain cannot dump every source's full list onto
+// one card. Trimming is at the tail, which preserves chain priority.
+func TestPooledReviewCandidatesAreCapped(t *testing.T) {
+	mk := func(slug string, n int) chainReview {
+		var cands []autotag.Candidate
+		for i := range n {
+			cands = append(cands, autotag.Candidate{
+				Gallery: source.SearchResult{ID: strconv.Itoa(i), EnglishTitle: "T"},
+			})
+		}
+		return chainReview{run: newAutoTagRun(&chainStub{slug: slug}, "auto", nil),
+			dec: autotag.Decision{Ranked: cands}}
+	}
+	got := pooledReviewCandidates([]chainReview{mk("nhentai", 20), mk("mangadex", 20)}, chainInput("/lib/T"))
+	if len(got) != pooledReviewMax {
+		t.Errorf("pooled length = %d, want the %d cap", len(got), pooledReviewMax)
+	}
+	if got[0].SourceSlug != "nhentai" {
+		t.Errorf("cap trimmed from the head; first = %q, want nhentai", got[0].SourceSlug)
+	}
+}
+
+// An auto-apply must NOT pool: gatherCandidates dedupes by bare gallery id with no provider
+// namespace and applyTags stamps one slug for a whole merge set, so a merge set spanning
+// sites would drop colliding ids and mis-record provenance.
+func TestChainAutoApplyNeverPoolsAcrossSources(t *testing.T) {
+	first := &chainStub{slug: "nhentai", results: []source.SearchResult{hit("1", "Some Title", 20)}}
+	second := &chainStub{slug: "mangadex", results: []source.SearchResult{hit("2", "Some Title", 20)}}
+	chain := buildChain(true, nil, first, second)
+
+	cm, err := (&App{}).matchThroughChain(context.Background(), chain,
+		chainInput("/lib/[Circle] Some Title"), 20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cm.dec.Action != autotag.ActionAuto {
+		t.Fatalf("expected an auto-apply, got %v", cm.dec.Action)
+	}
+	if len(cm.reviews) != 0 {
+		t.Errorf("an auto-apply must not carry pooled reviews, got %d", len(cm.reviews))
+	}
+	if second.searchCalls != 0 {
+		t.Errorf("a confident first match must end the chain, but mangadex ran %d searches", second.searchCalls)
+	}
+	for _, c := range cm.dec.Apply {
+		if c.Gallery.ID != "1" {
+			t.Errorf("merge set contains %q, which is not the winning source's", c.Gallery.ID)
+		}
 	}
 }
 

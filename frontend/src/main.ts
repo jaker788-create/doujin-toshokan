@@ -1233,16 +1233,20 @@ function buildMatchPicker(
             res.local_tags.length > 24 ? `<span class="nh-more">+${res.local_tags.length - 24} more</span>` : ''}</div>`
         : `<div class="nh-local-tags nh-local-notags">no tags yet</div>`;
     const mergeCount = res.merge_gallery_ids?.length || 0;
-    // Which site these candidates came from. With more than one source in play a bare
-    // "#12345" is ambiguous — two sites can use the same numeric id — so the picker names
+    // Which site these candidates came from. A bare "#12345" is ambiguous once more than
+    // one source is in play — two sites can use the same numeric id — so the picker names
     // its source, and applying sends that slug back (never the active one).
+    const srcLabels = [...new Set(res.candidates.map((c) => c.source_label).filter(Boolean))];
+    const mixedSources = srcLabels.length > 1;
     const srcTag = res.source_label
         ? `<span class="nh-src">${esc(res.source_label)}</span>`
         : '';
     const headHTML = auto
         ? `<div class="nh-auto"><p class="nh-picker-head">Auto-matched${srcTag ? ' from ' + srcTag : ''} — merges tags from ${mergeCount} galler${mergeCount === 1 ? 'y' : 'ies'}.</p>
              <button type="button" class="btn btn-primary nh-merge">Apply matched tags</button></div>`
-        : `<p class="nh-picker-head">Multiple possible matches${srcTag ? ' on ' + srcTag : ''} — pick the right one:</p>`;
+        : mixedSources
+            ? `<p class="nh-picker-head">Possible matches across ${esc(srcLabels.join(', '))} — pick the right one:</p>`
+            : `<p class="nh-picker-head">Multiple possible matches${srcTag ? ' on ' + srcTag : ''} — pick the right one:</p>`;
 
     wrap.innerHTML = `
         <div class="nh-local">${localCover}
@@ -1286,6 +1290,13 @@ function buildMatchPicker(
             ? `<div class="nh-tags">${renderTagChips(c.tags.slice(0, 24))}${
                 c.tags.length > 24 ? `<span class="nh-more">+${c.tags.length - 24} more</span>` : ''}</div>`
             : '';
+        // A review shortlist pools candidates from every source that found something, so
+        // each row names its own site — "#12345" means different galleries on different
+        // sites. Only shown when the list actually mixes sources; a single-source list
+        // already says so in the header.
+        const candSrc = mixedSources && c.source_label
+            ? `<span class="nh-src-chip">${esc(c.source_label)}</span> `
+            : '';
         const row = document.createElement('div');
         row.className = 'nh-cand'
             + (merged ? ' merged' : '')
@@ -1296,7 +1307,7 @@ function buildMatchPicker(
             <div class="nh-cand-main">
                 <button type="button" class="nh-en nh-link" title="Open in browser">${esc(c.english_title || c.japanese_title || ('gallery #' + c.gallery_id))}</button>
                 ${jp}
-                <span class="nh-meta">${pages} · ♥ ${c.num_favorites} · #${c.gallery_id}</span>
+                <span class="nh-meta">${candSrc}${pages} · ♥ ${c.num_favorites} · #${c.gallery_id}</span>
                 ${renderMatchBadges(c)}
                 ${tags}
             </div>
@@ -1310,7 +1321,9 @@ function buildMatchPicker(
             disableAll(true);
             applyBtn.textContent = 'Applying…';
             try {
-                const saved = await ApplySourceTags(mangaId, res.source_slug, c.gallery_id);
+                // The CANDIDATE's source, not the result's: a pooled shortlist mixes them,
+                // and a ref only resolves against the site that issued it.
+                const saved = await ApplySourceTags(mangaId, c.source_slug || res.source_slug, c.gallery_id);
                 toast('Tags applied');
                 onApplied(saved);
             } catch (err) {

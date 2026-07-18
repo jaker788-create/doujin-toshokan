@@ -308,12 +308,19 @@ func TestShortlistFlagsArtistAndParodyOverlap(t *testing.T) {
 		{Gallery: source.SearchResult{ID: "1", EnglishTitle: "[Group (Sanada)] Whatever (Kemono Jihen) [English]"}},
 		{Gallery: source.SearchResult{ID: "2", EnglishTitle: "[Other (Someone)] Whatever (Naruto)"}},
 	}
-	out := shortlist(ranked, 8, mi)
+	out := shortlist(ranked, 8, mi, "nhentai")
 	if !out[0].ArtistMatch || !out[0].ParodyMatch {
 		t.Errorf("candidate 0 should flag artist+parody overlap: %+v", out[0])
 	}
 	if out[1].ArtistMatch || out[1].ParodyMatch {
 		t.Errorf("candidate 1 should not overlap: %+v", out[1])
+	}
+	// Every candidate carries its own provenance — a pooled review shortlist mixes sources,
+	// and applying resolves the ref against the candidate's own provider.
+	for i, c := range out {
+		if c.SourceSlug != "nhentai" || c.SourceLabel != "nhentai" {
+			t.Errorf("candidate %d source = (%q,%q), want nhentai", i, c.SourceSlug, c.SourceLabel)
+		}
 	}
 }
 

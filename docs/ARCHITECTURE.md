@@ -162,11 +162,18 @@ and that is load-bearing — a run's `searchCache` is keyed by `SearchQuery.Cach
 its `detailCache` by bare gallery id, both provider-scoped, so a shared cache would serve
 one site's gallery for another's identical numeric id.
 
-Candidates are **never pooled across providers**: each provider's decision is kept whole
-and one wins, so a title's candidates always come from exactly one source. Pooling would
-break the id dedupe (no provider namespace), mis-stamp `source_slug` for a merge set
-spanning sites, and compare scores that are not comparable. For the same reason applying
-resolves against `MatchResult.SourceSlug` rather than the active source.
+An **auto-apply never spans providers**: the first source to clear the bar wins outright
+and its decision is applied whole. `gatherCandidates` dedupes by bare gallery id with no
+provider namespace and `applyTags` stamps one slug per merge set, so a set drawn from two
+sites would drop colliding ids and mis-record provenance.
+
+A **review does pool**: every source that found candidates contributes to the shortlist,
+grouped by provider in chain order — nothing is being applied yet, so hiding one site's
+options would just withhold the answer. Groups are never interleaved by score, because
+cross-provider scores are not comparable (MangaDex reports `NumPages: 0` for every series,
+so its candidates never earn the page bonus). Provenance therefore rides **per candidate**
+(`SourceCandidate.SourceSlug`), and applying resolves the ref against that provider rather
+than the active source.
 
 The `manga.source_slug` / `source_ref` link columns (migration 007) record
 which provider a title's tags came from as a `(slug, string-id)` pair — the provider-
