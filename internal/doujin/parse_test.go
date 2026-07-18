@@ -85,10 +85,12 @@ func TestSourcePrefixVariants(t *testing.T) {
 		{"NHENTAI-5 - Title", "nhentai", "5", "Title"},               // case-insensitive slug
 		{"mangadex-" + uuid + " - Title", "mangadex", uuid, "Title"}, // UUID ref
 		{"mangadex-" + uuid + "[A] T", "mangadex", uuid, "[A] T"},    // bracket-terminated ref
-		{"[A] Real Title", "", "", "[A] Real Title"},                 // no prefix: name untouched
-		{"nhentai- - [A] T", "", "", "nhentai- - [A] T"},             // "nhentai-" with no digits
-		{"mangadex-1234 - T", "", "", "mangadex-1234 - T"},           // not a UUID: not the pattern
-		{"foo-123 T", "", "", "foo-123 T"},                           // unregistered slug: untouched
+		{"hitomi-4056725 - [A] T", "hitomi", "4056725", "[A] T"},     // hitomi reuses leadingDigits
+		{"hitomi_1206600 [A] T", "hitomi", "1206600", "[A] T"},
+		{"[A] Real Title", "", "", "[A] Real Title"},       // no prefix: name untouched
+		{"nhentai- - [A] T", "", "", "nhentai- - [A] T"},   // "nhentai-" with no digits
+		{"mangadex-1234 - T", "", "", "mangadex-1234 - T"}, // not a UUID: not the pattern
+		{"foo-123 T", "", "", "foo-123 T"},                 // unregistered slug: untouched
 	}
 	for _, c := range cases {
 		slug, ref, rem := sourcePrefix(c.in)

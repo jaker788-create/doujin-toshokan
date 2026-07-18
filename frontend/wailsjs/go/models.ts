@@ -4,6 +4,7 @@ export namespace config {
 	    provider: string;
 	    api_key: string;
 	    user_agent: string;
+	    base_url?: string;
 	    secrets?: Record<string, string>;
 	    enabled: boolean;
 	
@@ -16,6 +17,7 @@ export namespace config {
 	        this.provider = source["provider"];
 	        this.api_key = source["api_key"];
 	        this.user_agent = source["user_agent"];
+	        this.base_url = source["base_url"];
 	        this.secrets = source["secrets"];
 	        this.enabled = source["enabled"];
 	    }
@@ -278,6 +280,7 @@ export namespace main {
 	    slug: string;
 	    label: string;
 	    needs_key: boolean;
+	    id_only: boolean;
 	    has_key: boolean;
 	    enabled: boolean;
 	    active: boolean;
@@ -292,6 +295,7 @@ export namespace main {
 	        this.slug = source["slug"];
 	        this.label = source["label"];
 	        this.needs_key = source["needs_key"];
+	        this.id_only = source["id_only"];
 	        this.has_key = source["has_key"];
 	        this.enabled = source["enabled"];
 	        this.active = source["active"];

@@ -57,6 +57,42 @@ func TestNhentaiRequiresKey(t *testing.T) {
 	}
 }
 
+// hitomi needs no key either, and is the first id-only source: the UI must be told it has
+// no free-text search, or a bulk sweep reporting "no match" on every title reads as a bug
+// rather than the documented contract.
+func TestHitomiIsKeylessAndIDOnly(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.SetActiveSource("hitomi"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := a.activeProvider()
+	if err != nil {
+		t.Fatalf("activeProvider: %v", err)
+	}
+	if p.Slug() != "hitomi" {
+		t.Errorf("active provider = %q, want hitomi", p.Slug())
+	}
+	if s, _ := a.GetSettings(); !s.ActiveSourceReady {
+		t.Error("hitomi needs no key, so it should be ready immediately")
+	}
+	srcs, err := a.GetSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range srcs {
+		switch s.Slug {
+		case "hitomi":
+			if s.NeedsKey || !s.IDOnly {
+				t.Errorf("hitomi state = %+v, want needs_key=false id_only=true", s)
+			}
+		case "nhentai", "mangadex":
+			if s.IDOnly {
+				t.Errorf("%s should not be marked id_only — it has a real search", s.Slug)
+			}
+		}
+	}
+}
+
 // An unknown provider slug is rejected by both setters.
 func TestUnknownProviderRejected(t *testing.T) {
 	a := newTestApp(t)

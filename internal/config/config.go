@@ -14,10 +14,16 @@ import (
 // source needs — some (mangadex) require no key, so an empty APIKey does not by itself
 // mean "disabled"; Enabled does. Secrets carries any extra per-provider auth material
 // (e.g. e-hentai session cookies) without widening the struct per site.
+//
+// BaseURL overrides the provider's API host; empty means the provider's own default.
+// It exists because a site can move its data domain out from under a shipped binary —
+// hitomi did exactly that (ltn.hitomi.la stopped resolving after the 2025-03 move), and
+// recovering from the next one should be a settings edit, not a release.
 type SourceConfig struct {
 	Provider  string            `json:"provider"`
 	APIKey    string            `json:"api_key"`
 	UserAgent string            `json:"user_agent"`
+	BaseURL   string            `json:"base_url,omitempty"`
 	Secrets   map[string]string `json:"secrets,omitempty"`
 	Enabled   bool              `json:"enabled"`
 }

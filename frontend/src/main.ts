@@ -1476,6 +1476,10 @@ function showContextMenu(x: number, y: number, items: { label: string; run: () =
 // (nhentai, MangaDex, …), a password field for a key-requiring source (only nhentai
 // needs one — MangaDex has an open API), and a ready/needs-key state chip that reveals
 // the Auto-tag link once the active source can actually run.
+//
+// An id_only source (hitomi) has no free-text search at all, so a bulk sweep can only
+// match titles whose folder carries the gallery id. Saying so here is the difference
+// between an understood limitation and an app that looks broken.
 function sourceSettings(st: main.Settings, sources: main.SourceState[]): string {
     const active = sources.find((s) => s.slug === st.active_source) || sources[0];
     const options = sources.map((s) =>
@@ -1488,7 +1492,10 @@ function sourceSettings(st: main.Settings, sources: main.SourceState[]): string 
     const state = st.active_source_ready
         ? `<span class="nh-key-state ok">ready</span> <a class="nh-autotag-link" href="#/autotag">Auto-tag library →</a>`
         : (active && active.needs_key ? `<span class="nh-key-state">no key set — needed for auto-tagging</span>` : '');
-    return `<div class="settings nh-settings"><span class="label">Tag source</span> ${picker} ${keyField} ${state}</div>`;
+    const idOnly = active && active.id_only
+        ? `<span class="nh-key-state note">no search — matches only folders named <code>${esc(active.slug)}-&lt;id&gt;</code></span>`
+        : '';
+    return `<div class="settings nh-settings"><span class="label">Tag source</span> ${picker} ${keyField} ${state}${idOnly}</div>`;
 }
 
 function scanMarkup(count: number, roots: string[], st: main.Settings, sources: main.SourceState[], missing: number): string {

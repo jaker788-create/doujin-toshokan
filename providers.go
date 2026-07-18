@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"doujin/internal/config"
+	"doujin/internal/hitomi"
 	"doujin/internal/mangadex"
 	"doujin/internal/nhentai"
 	"doujin/internal/source"
@@ -22,16 +23,24 @@ var errNoSource = errors.New("no metadata source configured — add one in Setti
 
 // providerPreset describes a built-in source the user can enable. NeedsKey drives whether
 // the Settings UI shows an API-key field (nhentai requires one; MangaDex does not).
+//
+// IDOnly marks a source with no free-text search (source.Provider allows it — see the
+// package doc — and such a provider returns an empty Search). It exists purely so the UI
+// can say so: without it, picking hitomi and running a bulk sweep would report "no match"
+// on every title that has no id in its folder name, which looks like a broken app rather
+// than the documented contract.
 type providerPreset struct {
 	Slug     string
 	Label    string
 	NeedsKey bool
+	IDOnly   bool
 }
 
 // providerPresets is the registry of known sources, in display order.
 var providerPresets = []providerPreset{
 	{Slug: nhentai.Slug, Label: nhentai.Label, NeedsKey: true},
 	{Slug: mangadex.Slug, Label: mangadex.Label, NeedsKey: false},
+	{Slug: hitomi.Slug, Label: hitomi.Label, NeedsKey: false, IDOnly: true},
 }
 
 // knownProvider reports whether slug names a built-in preset.
@@ -46,7 +55,7 @@ func knownProvider(slug string) bool {
 
 // buildProvider constructs the concrete source.Provider for a SourceConfig, applying each
 // provider's own auth requirement: nhentai needs an API key (errNoAPIKey without one),
-// MangaDex needs none. An empty User-Agent falls back to the app default.
+// MangaDex and hitomi need none. An empty User-Agent falls back to the app default.
 func buildProvider(sc config.SourceConfig) (source.Provider, error) {
 	ua := strings.TrimSpace(sc.UserAgent)
 	if ua == "" {
@@ -61,6 +70,10 @@ func buildProvider(sc config.SourceConfig) (source.Provider, error) {
 		return nhentai.NewClient(key, ua), nil
 	case mangadex.Slug:
 		return mangadex.NewClient(ua), nil
+	case hitomi.Slug:
+		// Empty BaseURL means the client's own default; the override exists so a data
+		// domain move is recoverable from settings (see config.SourceConfig.BaseURL).
+		return hitomi.NewClient(ua, strings.TrimSpace(sc.BaseURL)), nil
 	default:
 		return nil, fmt.Errorf("unknown source provider %q", sc.Provider)
 	}
@@ -87,6 +100,7 @@ type SourceState struct {
 	Slug      string `json:"slug"`
 	Label     string `json:"label"`
 	NeedsKey  bool   `json:"needs_key"`
+	IDOnly    bool   `json:"id_only"`
 	HasKey    bool   `json:"has_key"`
 	Enabled   bool   `json:"enabled"`
 	Active    bool   `json:"active"`
@@ -108,7 +122,7 @@ func (a *App) GetSources() ([]SourceState, error) {
 	active, hasActive := cfg.ActiveSourceConfig()
 	out := make([]SourceState, 0, len(providerPresets))
 	for _, p := range providerPresets {
-		st := SourceState{Slug: p.Slug, Label: p.Label, NeedsKey: p.NeedsKey}
+		st := SourceState{Slug: p.Slug, Label: p.Label, NeedsKey: p.NeedsKey, IDOnly: p.IDOnly}
 		if sc, ok := bySlug[p.Slug]; ok {
 			st.HasKey = strings.TrimSpace(sc.APIKey) != ""
 			st.Enabled = sc.Enabled

@@ -748,6 +748,9 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 .nh-settings .nh-key-input:focus { border-color: var(--vermilion); box-shadow: 0 0 0 3px var(--vermilion-soft); outline: none; }
 .nh-key-state { color: var(--paper-mute); }
 .nh-key-state.ok { color: var(--vermilion); }
+/* Capability note for an id-only source (no free-text search) — an aside, not a state. */
+.nh-key-state.note { font-size: .85em; opacity: .8; }
+.nh-key-state.note code { font-family: inherit; opacity: .95; }
 .nh-autotag-link { color: var(--paper-2); text-decoration: none; border-bottom: 1px solid var(--rule-strong); }
 .nh-autotag-link:hover { color: var(--vermilion); border-bottom-color: var(--vermilion); }
 

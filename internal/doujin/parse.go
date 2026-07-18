@@ -132,6 +132,7 @@ type sourceDef struct {
 var sourceDefs = []sourceDef{
 	{"nhentai", leadingDigits}, // numeric gallery id
 	{"mangadex", leadingUUID},  // UUID
+	{"hitomi", leadingDigits},  // numeric gallery id (the trailing number in a gallery URL)
 }
 
 // leadingDigits returns the run of ASCII digits at the start of s (nhentai/hitomi ids).
