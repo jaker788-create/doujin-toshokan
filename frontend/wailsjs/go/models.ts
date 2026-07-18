@@ -70,6 +70,7 @@ export namespace main {
 	export class AutoTagOptions {
 	    resync: boolean;
 	    language_mode: string;
+	    fallback: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new AutoTagOptions(source);
@@ -79,6 +80,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.resync = source["resync"];
 	        this.language_mode = source["language_mode"];
+	        this.fallback = source["fallback"];
 	    }
 	}
 	export class MangaDetail {

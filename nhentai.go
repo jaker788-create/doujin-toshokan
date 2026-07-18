@@ -179,6 +179,56 @@ func newAutoTagRun(client nhSearcher, langMode string, artistCount map[string]in
 	}
 }
 
+// sourceChain is the ordered set of providers one sweep may consult.
+//
+// It holds one fully-formed autoTagRun per provider rather than one run swapping clients,
+// and that is load-bearing: a run's searchCache is keyed by SearchQuery.CacheKey() and its
+// detailCache by bare gallery id, both of which are provider-scoped. hitomi gallery 12345
+// is not nhentai gallery 12345, so a shared cache would serve one site's gallery for
+// another's id. One run each keeps the keys apart for free.
+//
+// all is every member in priority order; fuzzy is the subset consulted for free-text
+// matching (an id-only source is excluded — its Search is empty by contract). bySlug
+// covers every member including the id-only ones, because the folder-id shortcut routes
+// by slug and that is precisely how an id-only provider earns its place.
+type sourceChain struct {
+	all    []*autoTagRun
+	fuzzy  []*autoTagRun
+	bySlug map[string]*autoTagRun
+}
+
+// newSourceChain builds the chain from the resolved providers. Every run shares the one
+// artistCount map: it is derived from the local library, so it says nothing about any
+// provider. fallback=false keeps only the first (active) provider in the fuzzy list, which
+// is what makes the sweep option a pure narrowing of behaviour rather than a second code
+// path.
+func newSourceChain(providers []chainedProvider, langMode string, artistCount map[string]int, fallback bool) *sourceChain {
+	ch := &sourceChain{bySlug: map[string]*autoTagRun{}}
+	for i, p := range providers {
+		run := newAutoTagRun(p.provider, langMode, artistCount)
+		ch.all = append(ch.all, run)
+		ch.bySlug[run.slug] = run
+		if p.idOnly {
+			continue // no free-text search to offer
+		}
+		if i > 0 && !fallback {
+			continue // fallback disabled: the active source alone answers searches
+		}
+		ch.fuzzy = append(ch.fuzzy, run)
+	}
+	return ch
+}
+
+// primary is the run for the active source. It is always all[0] — the chain is built
+// active-first — and an active source that is id-only still needs a run, for the shortcut
+// and for stamping, even though it never appears in fuzzy.
+func (c *sourceChain) primary() *autoTagRun {
+	if len(c.all) == 0 {
+		return nil
+	}
+	return c.all[0]
+}
+
 // normLangMode validates the per-run language mode, defaulting empty/unknown to "auto".
 func normLangMode(m string) string {
 	switch strings.ToLower(strings.TrimSpace(m)) {
@@ -497,6 +547,80 @@ func (a *App) gatherCandidates(ctx context.Context, run *autoTagRun, mi matchInp
 	return score(), truncated, nil
 }
 
+// chainMatch is the chain's verdict on one title: which run produced it and what it found.
+//
+// shortcut is non-nil when a folder-name gallery ref resolved directly, in which case dec
+// is unset — the ref is authoritative and never went through scoring. Otherwise dec holds
+// the winning provider's decision. Exactly one of the two is meaningful; callers branch on
+// shortcut first.
+type chainMatch struct {
+	run       *autoTagRun
+	shortcut  *source.GalleryDetail
+	dec       autotag.Decision
+	truncated bool
+	trace     string // per-title query trace across every provider consulted
+}
+
+// matchThroughChain resolves one title against the provider chain and returns the verdict
+// to act on, plus the trace of every provider consulted.
+//
+// Two phases. First the folder-id shortcut: a "<slug>-<ref>" in the folder name is an
+// exact pointer, so it routes to *that* provider — even when another source is active —
+// and skips searching entirely. That is strictly cheaper than what it replaces, one exact
+// fetch instead of a doomed multi-query fuzzy search, and it is the only way an id-only
+// source (hitomi) can match at all.
+//
+// Then the fuzzy chain, in priority order, advancing on anything short of an auto-apply.
+// Results are NOT pooled across providers: each provider's decision is kept whole and one
+// is chosen. Pooling would be wrong three ways — gatherCandidates dedupes by bare gallery
+// id with no provider namespace, applyTags stamps one slug for a whole merge set, and
+// cross-provider scores are not comparable (MangaDex reports NumPages 0 for every series,
+// so its candidates can never earn the page bonus). For that last reason the tie-break
+// between two review-only providers is chain order, not score: comparing them would be a
+// bogus comparison dressed up as intelligence.
+func (a *App) matchThroughChain(ctx context.Context, chain *sourceChain, mi matchInput, pages int, localLang string) (chainMatch, error) {
+	// Phase 1: an exact ref in the folder name, routed to its own provider.
+	if mi.sourceRef != "" {
+		if run := chain.bySlug[mi.sourceSlug]; run != nil {
+			if d, err := run.detail(ctx, mi.sourceRef); err == nil {
+				return chainMatch{run: run, shortcut: d}, nil
+			} else if ctx.Err() != nil {
+				return chainMatch{}, ctx.Err()
+			}
+			// A stale or bad ref (404) falls through to the fuzzy chain below.
+		}
+	}
+
+	// Phase 2: the fuzzy chain.
+	var best chainMatch
+	var traces []string
+	for _, run := range chain.fuzzy {
+		scored, truncated, err := a.gatherCandidates(ctx, run, mi, pages, localLang)
+		if err != nil {
+			return chainMatch{}, err
+		}
+		trace := run.slug + ": " + strings.Join(run.trace, "  ")
+		traces = append(traces, trace)
+		dec := autotag.Decide(scored)
+		cm := chainMatch{run: run, dec: dec, truncated: truncated, trace: trace}
+		if dec.Action == autotag.ActionAuto {
+			cm.trace = strings.Join(traces, "  |  ")
+			return cm, nil
+		}
+		// Keep the FIRST provider that produced anything; later ones only get to win by
+		// clearing the auto bar outright.
+		if best.run == nil && len(dec.Ranked) > 0 {
+			best = cm
+		}
+	}
+	if best.run == nil {
+		// Nothing anywhere: report against the primary so the outcome still names a source.
+		best = chainMatch{run: chain.primary()}
+	}
+	best.trace = strings.Join(traces, "  |  ")
+	return best, nil
+}
+
 // confidentMatch reports whether some scored candidate is safe enough to stop searching:
 // pages within tolerance and a full-enough title (autotag's auto-apply bar) AND — when
 // the local artist is known — the candidate is by that artist (the ArtistMatch the scorer
@@ -630,10 +754,14 @@ type MatchResult struct {
 	Candidates      []SourceCandidate `json:"candidates"`
 }
 
-// MatchSource searches the active provider for one title, ranks the results, and returns
+// MatchSource matches one title through the provider chain, ranks the results, and returns
 // the auto/review decision plus a shortlist. The top previewCount candidates are
 // detail-fetched so the UI can show their would-be tags. This makes several rate-limited
 // requests, so it can take a few seconds.
+//
+// It walks the same chain as the bulk sweep so the interactive path and a sweep cannot
+// disagree about which source wins a title — with fallback on, since a deliberate
+// single-title fetch is the case where trying harder is most clearly wanted.
 func (a *App) MatchSource(id int64) (*MatchResult, error) {
 	m, err := search.GetManga(a.db, id)
 	if err != nil {
@@ -642,7 +770,7 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manga %d not found", id)
 	}
-	client, err := a.activeProvider()
+	providers, err := a.chainProviders()
 	if err != nil {
 		return nil, err
 	}
@@ -653,39 +781,33 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 	}
 	// A single manual fetch: an empty artistCount keeps it on the title-first path (no
 	// full catalog page-through for one title), with Auto language narrowing.
-	run := newAutoTagRun(client, "auto", nil)
+	chain := newSourceChain(providers, "auto", nil, true)
 
-	// Shortcut: an exact gallery ref embedded in the folder name is authoritative — fetch
-	// that one gallery and present it as a confident match, skipping the fuzzy search
-	// entirely. Only fires when the folder's provider is the active one (we can only query
-	// the active provider); a mismatch or a bad/stale ref (fetch error, e.g. 404) falls
-	// through to search.
-	if mi.sourceRef != "" && mi.sourceSlug == run.slug {
-		if d, derr := run.detail(a.ctx, mi.sourceRef); derr == nil {
-			localTags, _ := search.GetMangaTagsTyped(a.db, id)
-			return &MatchResult{
-				MangaID:         id,
-				LocalTitle:      m.Title,
-				LocalAuthor:     m.AuthorName,
-				LocalPages:      m.PageCount,
-				LocalLanguage:   localLang,
-				LocalTags:       localTags,
-				FolderPath:      m.FolderPath,
-				CoverRelPath:    m.CoverRelPath,
-				Decision:        string(autotag.ActionAuto),
-				SourceSlug:      run.slug,
-				SourceLabel:     providerLabel(run.slug),
-				MergeGalleryIDs: []string{d.ID},
-				Candidates:      []SourceCandidate{galleryIDCandidate(d, m.PageCount, mi)},
-			}, nil
-		}
-	}
-
-	scored, _, err := a.gatherCandidates(a.ctx, run, mi, m.PageCount, localLang)
+	cm, err := a.matchThroughChain(a.ctx, chain, mi, m.PageCount, localLang)
 	if err != nil {
 		return nil, err
 	}
-	dec := autotag.Decide(scored)
+	// An exact gallery ref from the folder name is authoritative — present it as a
+	// confident match without scoring it.
+	if cm.shortcut != nil {
+		localTags, _ := search.GetMangaTagsTyped(a.db, id)
+		return &MatchResult{
+			MangaID:         id,
+			LocalTitle:      m.Title,
+			LocalAuthor:     m.AuthorName,
+			LocalPages:      m.PageCount,
+			LocalLanguage:   localLang,
+			LocalTags:       localTags,
+			FolderPath:      m.FolderPath,
+			CoverRelPath:    m.CoverRelPath,
+			Decision:        string(autotag.ActionAuto),
+			SourceSlug:      cm.run.slug,
+			SourceLabel:     providerLabel(cm.run.slug),
+			MergeGalleryIDs: []string{cm.shortcut.ID},
+			Candidates:      []SourceCandidate{galleryIDCandidate(cm.shortcut, m.PageCount, mi)},
+		}, nil
+	}
+	run, dec := cm.run, cm.dec
 	localTags, _ := search.GetMangaTagsTyped(a.db, id) // display only; nil on error is fine
 	res := &MatchResult{
 		MangaID:         id,
@@ -1028,18 +1150,28 @@ func markOverlap(c *SourceCandidate, localArtist string, localParodies map[strin
 // same-language matches higher. For an artist catalog the narrowed query is tried first
 // (keeping a prolific artist under the page cap) but falls back to all languages when it is
 // empty, so an artist's own works are never hidden — only fetched in a smaller batch first.
+//
+// Fallback walks the other enabled sources when one falls short of an auto-apply, instead
+// of consulting only the active source. It costs one extra pass per provider on every
+// title that does not match confidently, which is why it is a per-sweep choice rather than
+// a setting. NOTE it has no "unset" state: a bare {} from a caller that predates the field
+// decodes to false, so the frontend sends it explicitly.
 type AutoTagOptions struct {
 	Resync       bool   `json:"resync"`
 	LanguageMode string `json:"language_mode"`
+	Fallback     bool   `json:"fallback"`
 }
 
-// AutoTagProgress is emitted as "autotag:progress" once per processed title.
+// AutoTagProgress is emitted as "autotag:progress" once per processed title. Source names
+// the provider that produced the outcome — with a chain in play, "applied" alone no longer
+// says which site the tags came from.
 type AutoTagProgress struct {
 	Done    int    `json:"done"`
 	Total   int    `json:"total"`
 	MangaID int64  `json:"manga_id"`
 	Title   string `json:"title"`
 	Outcome string `json:"outcome"` // "applied" | "review" | "none" | "error"
+	Source  string `json:"source"`
 	Detail  string `json:"detail"`
 }
 
@@ -1065,7 +1197,10 @@ type autotagTarget struct {
 // Setup errors (no key, a run already in progress) are returned synchronously;
 // per-title outcomes arrive via events. Only one run may be active at a time.
 func (a *App) StartAutoTag(opts AutoTagOptions) error {
-	client, err := a.activeProvider()
+	// The active provider failing to build is still a hard error even with fallback on:
+	// sweeping quietly with the other sources would hide the misconfiguration the user
+	// needs to fix.
+	providers, err := a.chainProviders()
 	if err != nil {
 		return err
 	}
@@ -1093,9 +1228,9 @@ func (a *App) StartAutoTag(opts AutoTagOptions) error {
 			artistCount[name]++
 		}
 	}
-	run := newAutoTagRun(client, opts.LanguageMode, artistCount)
+	chain := newSourceChain(providers, opts.LanguageMode, artistCount, opts.Fallback)
 
-	go a.runAutoTag(ctx, run, targets)
+	go a.runAutoTag(ctx, chain, targets)
 	return nil
 }
 
@@ -1147,10 +1282,10 @@ func (a *App) autotagTargets(resync bool) ([]autotagTarget, error) {
 	return out, rows.Err()
 }
 
-// runAutoTag is the background loop. For each title it searches, decides, and either
-// auto-applies (fetching the chosen gallery) or queues the title for review. A
-// cancelled context ends the loop and emits a final cancelled event.
-func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotagTarget) {
+// runAutoTag is the background loop. For each title it matches through the provider chain,
+// decides, and either auto-applies (fetching the chosen gallery) or queues the title for
+// review. A cancelled context ends the loop and emits a final cancelled event.
+func (a *App) runAutoTag(ctx context.Context, chain *sourceChain, targets []autotagTarget) {
 	defer a.clearAutotag()
 
 	done := AutoTagDone{Total: len(targets), NeedsReview: []MatchResult{}}
@@ -1168,31 +1303,7 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 			localLang = a.localLanguageTag(t.id)
 		}
 
-		// Shortcut: an exact gallery ref in the folder name is authoritative — fetch that
-		// one gallery and auto-apply its tags, skipping the multi-query search (cheaper and
-		// exact). Only fires when the folder's provider is the active one. A cancellation
-		// aborts the run; a mismatch or any other fetch error (e.g. a stale ref) falls
-		// through to the normal search below.
-		if mi.sourceRef != "" && mi.sourceSlug == run.slug {
-			if d, derr := run.detail(ctx, mi.sourceRef); derr == nil {
-				if _, aerr := a.applyTags(t.id, run.slug, d.ID, []*source.GalleryDetail{d}); aerr != nil {
-					prog.Outcome, prog.Detail = "error", aerr.Error()
-					a.emit(prog)
-					continue
-				}
-				done.Applied++
-				prog.Outcome = "applied"
-				prog.Detail = fmt.Sprintf("gallery #%s (from name): %s", d.ID, d.EnglishTitle)
-				a.emit(prog)
-				continue
-			} else if ctx.Err() != nil {
-				done.Cancelled = true
-				a.emitDone(done)
-				return
-			}
-		}
-
-		scored, truncated, err := a.gatherCandidates(ctx, run, mi, t.pages, localLang)
+		cm, err := a.matchThroughChain(ctx, chain, mi, t.pages, localLang)
 		if err != nil {
 			if ctx.Err() != nil {
 				done.Cancelled = true
@@ -1203,11 +1314,30 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 			a.emit(prog)
 			continue
 		}
+		run, dec, truncated := cm.run, cm.dec, cm.truncated
+		if run != nil {
+			prog.Source = providerLabel(run.slug)
+		}
 
-		dec := autotag.Decide(scored)
+		// An exact gallery ref in the folder name is authoritative — apply it without
+		// scoring, which is both cheaper and exact.
+		if cm.shortcut != nil {
+			d := cm.shortcut
+			if _, aerr := a.applyTags(t.id, run.slug, d.ID, []*source.GalleryDetail{d}); aerr != nil {
+				prog.Outcome, prog.Detail = "error", aerr.Error()
+				a.emit(prog)
+				continue
+			}
+			done.Applied++
+			prog.Outcome = "applied"
+			prog.Detail = fmt.Sprintf("gallery #%s (from name): %s", d.ID, d.EnglishTitle)
+			a.emit(prog)
+			continue
+		}
+
 		if len(dec.Ranked) == 0 {
 			prog.Outcome = "none"
-			prog.Detail = reviewDetail(run.trace, truncated)
+			prog.Detail = reviewDetail(cm.trace, truncated)
 			a.emit(prog)
 			continue
 		}
@@ -1265,18 +1395,19 @@ func (a *App) runAutoTag(ctx context.Context, run *autoTagRun, targets []autotag
 			Candidates:    shortlist(reviewPool(dec.Ranked), reviewMax, mi),
 		})
 		prog.Outcome = "review"
-		prog.Detail = reviewDetail(run.trace, truncated)
+		prog.Detail = reviewDetail(cm.trace, truncated)
 		a.emit(prog)
 	}
 	a.emitDone(done)
 }
 
 // reviewDetail builds the diagnostic detail for a review/none outcome: the per-title query
-// trace (each query→result-count) plus the truncation note when the catalog hit its cap. It
-// is what surfaces, in the sweep log, exactly which query came back empty for an artist that
-// "isn't matching".
-func reviewDetail(trace []string, truncated bool) string {
-	d := strings.Join(trace, "  ")
+// trace (each query→result-count, one slug-prefixed section per provider consulted) plus
+// the truncation note when the catalog hit its cap. It is what surfaces, in the sweep log,
+// exactly which query came back empty for an artist that "isn't matching" — and, with a
+// chain, which sources were tried before giving up.
+func reviewDetail(trace string, truncated bool) string {
+	d := trace
 	if truncated {
 		if d != "" {
 			d += "  "

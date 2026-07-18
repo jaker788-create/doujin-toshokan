@@ -106,6 +106,61 @@ func (a *App) activeProvider() (source.Provider, error) {
 	return buildProvider(sc)
 }
 
+// chainedProvider is one member of a sweep's provider chain: the built client plus whether
+// it can answer a free-text search at all. An IDOnly source (hitomi) returns an empty
+// Search by contract, so it is skipped in the fuzzy phase — consulting it there would add
+// a guaranteed-empty pass per title — while staying eligible for the folder-id shortcut,
+// which is the whole point of such a provider.
+type chainedProvider struct {
+	provider source.Provider
+	idOnly   bool
+}
+
+// chainProviders returns the providers one sweep may consult, in priority order: the
+// active source first, then the remaining enabled sources in config order.
+//
+// The active provider failing to build is a hard error, preserving the behaviour of a
+// single-source sweep (nhentai without a key must still say so rather than quietly
+// sweeping with whatever else is enabled — that would hide the misconfiguration). A
+// non-active source that fails to build is skipped instead: one unconfigured extra source
+// must not abort a sweep the user asked for.
+func (a *App) chainProviders() ([]chainedProvider, error) {
+	cfg, err := config.Load(a.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	active, ok := cfg.ActiveSourceConfig()
+	if !ok {
+		return nil, errNoSource
+	}
+	p, err := buildProvider(active)
+	if err != nil {
+		return nil, err
+	}
+	out := []chainedProvider{{provider: p, idOnly: providerIsIDOnly(active.Provider)}}
+	for _, sc := range cfg.ResolveSources() {
+		if !sc.Enabled || sc.Provider == active.Provider {
+			continue
+		}
+		q, berr := buildProvider(sc)
+		if berr != nil {
+			continue // unconfigured extra source: skip, don't fail the sweep
+		}
+		out = append(out, chainedProvider{provider: q, idOnly: providerIsIDOnly(sc.Provider)})
+	}
+	return out, nil
+}
+
+// providerIsIDOnly reports whether a slug names a source with no free-text search.
+func providerIsIDOnly(slug string) bool {
+	for _, p := range providerPresets {
+		if p.Slug == slug {
+			return p.IDOnly
+		}
+	}
+	return false
+}
+
 // providerBySlug builds a specific configured provider by slug, falling back to the active
 // source when slug is empty. Apply paths use it to go back to the provider a candidate
 // actually came from: a gallery ref only means something to the site that issued it, so

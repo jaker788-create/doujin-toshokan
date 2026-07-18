@@ -1730,6 +1730,7 @@ interface ATProgress {
     manga_id: number;
     title: string;
     outcome: string;
+    source: string;
     detail: string;
 }
 interface ATDone {
@@ -1750,8 +1751,8 @@ function autotagMarkup(ready: boolean, label: string): string {
     }
     return `<section class="at-page">
         <a class="back-link" href="#/scan">← Scan &amp; settings</a>
-        <h1>Auto-tag from ${esc(label)}</h1>
-        <p class="at-intro">Searches ${esc(label)} for each title, auto-applies confident
+        <h1>Auto-tag library</h1>
+        <p class="at-intro">Starts with ${esc(label)} for each title, auto-applies confident
             matches (strong title + artist/page match), and queues the rest for you
             to confirm below. Requests are rate-limited, so a large library takes a while.</p>
         <div class="at-controls">
@@ -1763,6 +1764,7 @@ function autotagMarkup(ready: boolean, label: string): string {
                     <option value="japanese">Japanese only</option>
                 </select>
             </label>
+            <label class="at-resync" title="A folder named &lt;source&gt;-&lt;id&gt; always goes to that source, either way."><input type="checkbox" data-fallback checked> Try other enabled sources when ${esc(label)} finds nothing</label>
             <button type="button" class="btn btn-primary" data-start>Start auto-tagging</button>
             <button type="button" class="btn" data-cancel hidden>Cancel</button>
         </div>
@@ -1826,6 +1828,7 @@ async function renderAutotag(): Promise<void> {
     const cancelBtn = viewEl().querySelector('[data-cancel]') as HTMLButtonElement;
     const resync = viewEl().querySelector('[data-resync]') as HTMLInputElement;
     const langMode = viewEl().querySelector('[data-langmode]') as HTMLSelectElement;
+    const fallback = viewEl().querySelector('[data-fallback]') as HTMLInputElement;
     const barWrap = viewEl().querySelector('.at-progress') as HTMLElement;
     const bar = viewEl().querySelector('.at-bar-fill') as HTMLElement;
     const statusEl = viewEl().querySelector('.at-status') as HTMLElement;
@@ -1891,8 +1894,11 @@ async function renderAutotag(): Promise<void> {
             const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
             bar.style.width = pct + '%';
             statusEl.textContent = `${p.done} / ${p.total} — ${p.title}`;
-            const label = p.outcome === 'applied' ? `✓ ${p.title} → ${p.detail}`
-                : p.outcome === 'review' ? `? ${p.title} — needs review${p.detail ? ' · ' + p.detail : ''}`
+            // Name the winning source: with a chain, "applied" alone no longer says which
+            // site the tags came from.
+            const src = p.source ? ` [${p.source}]` : '';
+            const label = p.outcome === 'applied' ? `✓ ${p.title}${src} → ${p.detail}`
+                : p.outcome === 'review' ? `? ${p.title}${src} — needs review${p.detail ? ' · ' + p.detail : ''}`
                 : p.outcome === 'none' ? `– ${p.title} — no match${p.detail ? ' · ' + p.detail : ''}`
                 : `✗ ${p.title} — ${p.detail}`;
             logLine(p.outcome, label);
@@ -1911,7 +1917,13 @@ async function renderAutotag(): Promise<void> {
         });
 
         try {
-            await StartAutoTag({ resync: resync.checked, language_mode: langMode.value });
+            // fallback is sent explicitly: the Go field is a plain bool with no unset
+            // state, so omitting it would silently mean "off".
+            await StartAutoTag({
+                resync: resync.checked,
+                language_mode: langMode.value,
+                fallback: fallback.checked,
+            });
         } catch (err) {
             console.error(err);
             detach();
