@@ -291,6 +291,7 @@ export namespace main {
 	    label: string;
 	    needs_key: boolean;
 	    id_only: boolean;
+	    ref_hint: string;
 	    has_key: boolean;
 	    enabled: boolean;
 	    active: boolean;
@@ -306,6 +307,7 @@ export namespace main {
 	        this.label = source["label"];
 	        this.needs_key = source["needs_key"];
 	        this.id_only = source["id_only"];
+	        this.ref_hint = source["ref_hint"];
 	        this.has_key = source["has_key"];
 	        this.enabled = source["enabled"];
 	        this.active = source["active"];

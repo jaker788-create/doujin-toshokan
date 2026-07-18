@@ -87,10 +87,18 @@ func TestSourcePrefixVariants(t *testing.T) {
 		{"mangadex-" + uuid + "[A] T", "mangadex", uuid, "[A] T"},    // bracket-terminated ref
 		{"hitomi-4056725 - [A] T", "hitomi", "4056725", "[A] T"},     // hitomi reuses leadingDigits
 		{"hitomi_1206600 [A] T", "hitomi", "1206600", "[A] T"},
-		{"[A] Real Title", "", "", "[A] Real Title"},       // no prefix: name untouched
-		{"nhentai- - [A] T", "", "", "nhentai- - [A] T"},   // "nhentai-" with no digits
-		{"mangadex-1234 - T", "", "", "mangadex-1234 - T"}, // not a UUID: not the pattern
-		{"foo-123 T", "", "", "foo-123 T"},                 // unregistered slug: untouched
+		// e-hentai: a gid + 10-hex-char token pair, dash-joined because "gid/token" cannot
+		// be a filename. The client canonicalizes the pair back to the slash form.
+		{"ehentai-618395-0439fa3666 - [A] T", "ehentai", "618395-0439fa3666", "[A] T"},
+		{"ehentai_4061329-FD34412545 [A] T", "ehentai", "4061329-FD34412545", "[A] T"}, // hex is case-insensitive
+		{"ehentai-618395-0439fa3666[A] T", "ehentai", "618395-0439fa3666", "[A] T"},    // bracket-terminated
+		{"ehentai-618395-0439fa36 - T", "", "", "ehentai-618395-0439fa36 - T"},         // token too short
+		{"ehentai-618395-0439fa3666aa - T", "", "", "ehentai-618395-0439fa3666aa - T"}, // token too long
+		{"ehentai-618395 - T", "", "", "ehentai-618395 - T"},                           // gid with no token
+		{"[A] Real Title", "", "", "[A] Real Title"},                                   // no prefix: name untouched
+		{"nhentai- - [A] T", "", "", "nhentai- - [A] T"},                               // "nhentai-" with no digits
+		{"mangadex-1234 - T", "", "", "mangadex-1234 - T"},                             // not a UUID: not the pattern
+		{"foo-123 T", "", "", "foo-123 T"},                                             // unregistered slug: untouched
 	}
 	for _, c := range cases {
 		slug, ref, rem := sourcePrefix(c.in)

@@ -130,9 +130,10 @@ type sourceDef struct {
 }
 
 var sourceDefs = []sourceDef{
-	{"nhentai", leadingDigits}, // numeric gallery id
-	{"mangadex", leadingUUID},  // UUID
-	{"hitomi", leadingDigits},  // numeric gallery id (the trailing number in a gallery URL)
+	{"nhentai", leadingDigits},   // numeric gallery id
+	{"mangadex", leadingUUID},    // UUID
+	{"hitomi", leadingDigits},    // numeric gallery id (the trailing number in a gallery URL)
+	{"ehentai", leadingGidToken}, // "<gid>-<token>" pair — a slash is illegal in a filename
 }
 
 // leadingDigits returns the run of ASCII digits at the start of s (nhentai/hitomi ids).
@@ -149,6 +150,24 @@ var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 
 // leadingUUID returns a canonical UUID at the start of s, or "".
 func leadingUUID(s string) string { return uuidRe.FindString(s) }
+
+// gidTokenRe matches e-hentai's "<gid>-<token>" pair at the start of s, capturing just the
+// pair. E-Hentai identifies a gallery by a number plus a 10-hex-character token (the token
+// is a capability — the right gid with the wrong token is refused), and it is written with
+// a dash because the canonical "gid/token" form cannot appear in a filename. Requiring the
+// hex run to END at 10 is what stops a title that happens to open with hex text from being
+// swallowed into the ref.
+var gidTokenRe = regexp.MustCompile(`^([0-9]+-[0-9a-fA-F]{10})(?:[^0-9a-fA-F]|$)`)
+
+// leadingGidToken returns an e-hentai "<gid>-<token>" pair at the start of s, or "". The
+// pair is returned as written; the ehentai client canonicalizes it to "gid/token".
+func leadingGidToken(s string) string {
+	m := gidTokenRe.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
 
 // sourcePrefix peels a leading "<slug>-<ref>" decoration that rippers prepend to the
 // conventional name, e.g. "nhentai-271687 - [Circle] Title …" or

@@ -1502,9 +1502,11 @@ function showContextMenu(x: number, y: number, items: { label: string; run: () =
 // needs one — MangaDex has an open API), and a ready/needs-key state chip that reveals
 // the Auto-tag link once the active source can actually run.
 //
-// An id_only source (hitomi) has no free-text search at all, so a bulk sweep can only
-// match titles whose folder carries the gallery id. Saying so here is the difference
-// between an understood limitation and an app that looks broken.
+// An id_only source (hitomi, e-hentai) has no free-text search at all, so a bulk sweep can
+// only match titles whose folder carries the gallery ref. Saying so here is the difference
+// between an understood limitation and an app that looks broken. The ref *form* comes from
+// the backend (ref_hint) rather than being built as "<slug>-<id>": e-hentai needs a gid and
+// a token, so a guessed single-id form would document a name that never matches.
 function sourceSettings(st: main.Settings, sources: main.SourceState[]): string {
     const active = sources.find((s) => s.slug === st.active_source) || sources[0];
     const options = sources.map((s) =>
@@ -1518,7 +1520,7 @@ function sourceSettings(st: main.Settings, sources: main.SourceState[]): string 
         ? `<span class="nh-key-state ok">ready</span> <a class="nh-autotag-link" href="#/autotag">Auto-tag library →</a>`
         : (active && active.needs_key ? `<span class="nh-key-state">no key set — needed for auto-tagging</span>` : '');
     const idOnly = active && active.id_only
-        ? `<span class="nh-key-state note">no search — matches only folders named <code>${esc(active.slug)}-&lt;id&gt;</code></span>`
+        ? `<span class="nh-key-state note">no search — matches only folders named <code>${esc(active.ref_hint || `${active.slug}-<id>`)}</code></span>`
         : '';
     return `<div class="settings nh-settings"><span class="label">Tag source</span> ${picker} ${keyField} ${state}${idOnly}</div>`;
 }

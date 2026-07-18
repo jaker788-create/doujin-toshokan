@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"doujin/internal/config"
+	"doujin/internal/ehentai"
 	"doujin/internal/hitomi"
 	"doujin/internal/mangadex"
 	"doujin/internal/nhentai"
@@ -29,18 +30,25 @@ var errNoSource = errors.New("no metadata source configured — add one in Setti
 // can say so: without it, picking hitomi and running a bulk sweep would report "no match"
 // on every title that has no id in its folder name, which looks like a broken app rather
 // than the documented contract.
+// RefHint is the folder-name form that routes a title to this source, shown verbatim in
+// the UI. It exists because the shape of a gallery ref is provider knowledge and is NOT
+// uniform: most sources take a single id, but e-hentai needs a gid *and* a token. A UI
+// that assumed "<slug>-<id>" would tell e-hentai users to name folders in a form that
+// silently never matches. It must stay in step with internal/doujin's sourceDefs.
 type providerPreset struct {
 	Slug     string
 	Label    string
 	NeedsKey bool
 	IDOnly   bool
+	RefHint  string
 }
 
 // providerPresets is the registry of known sources, in display order.
 var providerPresets = []providerPreset{
-	{Slug: nhentai.Slug, Label: nhentai.Label, NeedsKey: true},
-	{Slug: mangadex.Slug, Label: mangadex.Label, NeedsKey: false},
-	{Slug: hitomi.Slug, Label: hitomi.Label, NeedsKey: false, IDOnly: true},
+	{Slug: nhentai.Slug, Label: nhentai.Label, NeedsKey: true, RefHint: "nhentai-<id>"},
+	{Slug: mangadex.Slug, Label: mangadex.Label, NeedsKey: false, RefHint: "mangadex-<uuid>"},
+	{Slug: hitomi.Slug, Label: hitomi.Label, NeedsKey: false, IDOnly: true, RefHint: "hitomi-<id>"},
+	{Slug: ehentai.Slug, Label: ehentai.Label, NeedsKey: false, IDOnly: true, RefHint: "ehentai-<gid>-<token>"},
 }
 
 // providerLabel maps a slug to its human label for display, falling back to the slug
@@ -67,7 +75,8 @@ func knownProvider(slug string) bool {
 
 // buildProvider constructs the concrete source.Provider for a SourceConfig, applying each
 // provider's own auth requirement: nhentai needs an API key (errNoAPIKey without one),
-// MangaDex and hitomi need none. An empty User-Agent falls back to the app default.
+// MangaDex, hitomi and e-hentai need none. An empty User-Agent falls back to the app
+// default.
 func buildProvider(sc config.SourceConfig) (source.Provider, error) {
 	ua := strings.TrimSpace(sc.UserAgent)
 	if ua == "" {
@@ -86,6 +95,10 @@ func buildProvider(sc config.SourceConfig) (source.Provider, error) {
 		// Empty BaseURL means the client's own default; the override exists so a data
 		// domain move is recoverable from settings (see config.SourceConfig.BaseURL).
 		return hitomi.NewClient(ua, strings.TrimSpace(sc.BaseURL)), nil
+	case ehentai.Slug:
+		// Keyless: the public gdata API needs no auth. ExHentai-exclusive galleries would
+		// need session cookies (SourceConfig.Secrets) — deliberately not wired yet.
+		return ehentai.NewClient(ua, strings.TrimSpace(sc.BaseURL)), nil
 	default:
 		return nil, fmt.Errorf("unknown source provider %q", sc.Provider)
 	}
@@ -198,6 +211,7 @@ type SourceState struct {
 	Label     string `json:"label"`
 	NeedsKey  bool   `json:"needs_key"`
 	IDOnly    bool   `json:"id_only"`
+	RefHint   string `json:"ref_hint"`
 	HasKey    bool   `json:"has_key"`
 	Enabled   bool   `json:"enabled"`
 	Active    bool   `json:"active"`
@@ -219,7 +233,7 @@ func (a *App) GetSources() ([]SourceState, error) {
 	active, hasActive := cfg.ActiveSourceConfig()
 	out := make([]SourceState, 0, len(providerPresets))
 	for _, p := range providerPresets {
-		st := SourceState{Slug: p.Slug, Label: p.Label, NeedsKey: p.NeedsKey, IDOnly: p.IDOnly}
+		st := SourceState{Slug: p.Slug, Label: p.Label, NeedsKey: p.NeedsKey, IDOnly: p.IDOnly, RefHint: p.RefHint}
 		if sc, ok := bySlug[p.Slug]; ok {
 			st.HasKey = strings.TrimSpace(sc.APIKey) != ""
 			st.Enabled = sc.Enabled
