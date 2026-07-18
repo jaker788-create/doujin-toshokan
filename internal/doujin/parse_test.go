@@ -34,8 +34,8 @@ func TestParseStripsNhentaiPrefix(t *testing.T) {
 	name := "nhentai-271687 - [Kisho-Muri (A6)] Himitsu no Suiyoubi - Secret Wednesdays [English] {Shotachan} [Digital]"
 	p := ParseName(name)
 
-	if p.GalleryID != 271687 {
-		t.Errorf("GalleryID = %d, want 271687", p.GalleryID)
+	if p.SourceSlug != "nhentai" || p.SourceRef != "271687" {
+		t.Errorf("Source = (%q,%q), want (nhentai,271687)", p.SourceSlug, p.SourceRef)
 	}
 	if p.Circle != "Kisho-Muri (A6)" {
 		t.Errorf("Circle = %q, want %q", p.Circle, "Kisho-Muri (A6)")
@@ -75,21 +75,35 @@ func TestDashSeparatorSplitsButKeepsHyphens(t *testing.T) {
 }
 
 func TestSourcePrefixVariants(t *testing.T) {
+	const uuid = "550e8400-e29b-41d4-a716-446655440000"
 	cases := []struct {
-		in      string
-		wantID  int64
-		wantRem string
+		in                         string
+		wantSlug, wantRef, wantRem string
 	}{
-		{"nhentai-271687 - [A] T", 271687, "[A] T"},
-		{"nhentai_99 [A] T", 99, "[A] T"},           // underscore join, no dash
-		{"NHENTAI-5 - Title", 5, "Title"},           // case-insensitive
-		{"[A] Real Title", 0, "[A] Real Title"},     // no prefix: id 0, name untouched
-		{"nhentai- - [A] T", 0, "nhentai- - [A] T"}, // "nhentai-" with no digits: not the pattern
+		{"nhentai-271687 - [A] T", "nhentai", "271687", "[A] T"},
+		{"nhentai_99 [A] T", "nhentai", "99", "[A] T"},               // underscore join, no dash
+		{"NHENTAI-5 - Title", "nhentai", "5", "Title"},               // case-insensitive slug
+		{"mangadex-" + uuid + " - Title", "mangadex", uuid, "Title"}, // UUID ref
+		{"mangadex-" + uuid + "[A] T", "mangadex", uuid, "[A] T"},    // bracket-terminated ref
+		{"hitomi-4056725 - [A] T", "hitomi", "4056725", "[A] T"},     // hitomi reuses leadingDigits
+		{"hitomi_1206600 [A] T", "hitomi", "1206600", "[A] T"},
+		// e-hentai: a gid + 10-hex-char token pair, dash-joined because "gid/token" cannot
+		// be a filename. The client canonicalizes the pair back to the slash form.
+		{"ehentai-618395-0439fa3666 - [A] T", "ehentai", "618395-0439fa3666", "[A] T"},
+		{"ehentai_4061329-FD34412545 [A] T", "ehentai", "4061329-FD34412545", "[A] T"}, // hex is case-insensitive
+		{"ehentai-618395-0439fa3666[A] T", "ehentai", "618395-0439fa3666", "[A] T"},    // bracket-terminated
+		{"ehentai-618395-0439fa36 - T", "", "", "ehentai-618395-0439fa36 - T"},         // token too short
+		{"ehentai-618395-0439fa3666aa - T", "", "", "ehentai-618395-0439fa3666aa - T"}, // token too long
+		{"ehentai-618395 - T", "", "", "ehentai-618395 - T"},                           // gid with no token
+		{"[A] Real Title", "", "", "[A] Real Title"},                                   // no prefix: name untouched
+		{"nhentai- - [A] T", "", "", "nhentai- - [A] T"},                               // "nhentai-" with no digits
+		{"mangadex-1234 - T", "", "", "mangadex-1234 - T"},                             // not a UUID: not the pattern
+		{"foo-123 T", "", "", "foo-123 T"},                                             // unregistered slug: untouched
 	}
 	for _, c := range cases {
-		id, rem := sourcePrefix(c.in)
-		if id != c.wantID || rem != c.wantRem {
-			t.Errorf("sourcePrefix(%q) = (%d,%q), want (%d,%q)", c.in, id, rem, c.wantID, c.wantRem)
+		slug, ref, rem := sourcePrefix(c.in)
+		if slug != c.wantSlug || ref != c.wantRef || rem != c.wantRem {
+			t.Errorf("sourcePrefix(%q) = (%q,%q,%q), want (%q,%q,%q)", c.in, slug, ref, rem, c.wantSlug, c.wantRef, c.wantRem)
 		}
 	}
 }

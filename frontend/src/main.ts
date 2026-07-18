@@ -5,7 +5,8 @@ import {
     CountMissing, RemoveMissing, DeleteManga,
     GetConfig, AddLibraryRoot, RemoveLibraryRoot,
     StashSave, StashList, StashGet, StashSetPage, StashRemove,
-    GetSettings, SetNhentaiKey, MatchNhentai, ApplyNhentaiTags, ApplyNhentaiMerge,
+    GetSettings, GetSources, SetSourceConfig, SetActiveSource,
+    MatchSource, ApplySourceTags, ApplySourceMerge,
     StartAutoTag, CancelAutoTag,
 } from '../wailsjs/go/main/App';
 import { main, search, stash, tag } from '../wailsjs/go/models';
@@ -163,9 +164,13 @@ function setReaderFitWidth(on: boolean): void {
 // WebView2 loads nhentai's public CDN directly, so candidate covers are plain remote
 // <img>s — no proxy. The cover's real extension isn't in the API, so wireCover walks
 // the candidates (absolute thumbnail first, then jpg/webp/png/gif from media_id) on
-// each load error and gives up to a neutral tile.
+// each load error and gives up to a neutral tile. NOTE: the media_id reconstruction is
+// load-bearing, not dead weight — a detail-fetched candidate (the nhentai-<id> folder-id
+// shortcut → galleryIDCandidate) comes from a source.GalleryDetail, which has no thumbnail
+// field, so media_id is its ONLY cover source. Don't drop it unless GalleryDetail grows a
+// server-built cover URL (see MULTI_SOURCE_ROADMAP.md §3.5).
 const COVER_EXTS = ['jpg', 'webp', 'png', 'gif'];
-function coverCandidates(c: main.NhentaiCandidate): string[] {
+function coverCandidates(c: main.SourceCandidate): string[] {
     const srcs: string[] = [];
     if (c.thumbnail && /^https?:\/\//.test(c.thumbnail)) srcs.push(c.thumbnail);
     if (c.media_id) {
@@ -174,7 +179,7 @@ function coverCandidates(c: main.NhentaiCandidate): string[] {
     }
     return srcs;
 }
-function wireCover(img: HTMLImageElement, c: main.NhentaiCandidate): void {
+function wireCover(img: HTMLImageElement, c: main.SourceCandidate): void {
     const srcs = coverCandidates(c);
     let i = 0;
     const next = () => {
@@ -187,7 +192,7 @@ function wireCover(img: HTMLImageElement, c: main.NhentaiCandidate): void {
 
 // renderMatchBadges turns a candidate's scoring signals into compact "why-match"
 // badges: page match, title %, language match/mismatch, and artist/parody overlap.
-function renderMatchBadges(c: main.NhentaiCandidate): string {
+function renderMatchBadges(c: main.SourceCandidate): string {
     const b: string[] = [];
     if (c.pages_exact) b.push(`<span class="nh-badge ok">✓ exact pages</span>`);
     else if (c.page_delta >= 0) b.push(`<span class="nh-badge">±${c.page_delta} pages</span>`);
@@ -646,7 +651,7 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
             </form>
             <div class="tag-actions">
                 <button type="button" class="tag-edit-toggle btn">${d.tags.length ? 'Edit tags' : '+ Add tags'}</button>
-                <button type="button" class="nh-fetch btn">Fetch tags (nhentai)</button>
+                <button type="button" class="nh-fetch btn">Fetch tags</button>
             </div>
             <div class="nh-panel" hidden></div>
         </div>
@@ -1168,9 +1173,9 @@ function wireTagEditor(id: number, initial: Typed[]): void {
         nhBtn.addEventListener('click', async () => {
             nhBtn.disabled = true;
             const label = nhBtn.textContent;
-            nhBtn.textContent = 'Searching nhentai…';
+            nhBtn.textContent = 'Searching…';
             try {
-                const res = await MatchNhentai(id);
+                const res = await MatchSource(id);
                 nhPanel.innerHTML = '';
                 nhPanel.appendChild(buildMatchPicker(id, res, (saved) => {
                     renderTags(saved);
@@ -1189,12 +1194,15 @@ function wireTagEditor(id: number, initial: Typed[]): void {
     }
 }
 
-// nhErr maps a backend error to a friendly message, special-casing the missing-key
-// case so the user knows where to fix it.
+// nhErr maps a backend error to a friendly message, special-casing the missing-key /
+// missing-source case so the user knows where to fix it.
 function nhErr(err: unknown): string {
     const msg = String((err as { message?: string } | undefined)?.message || err || '');
-    if (msg.toLowerCase().includes('api key')) return 'Add your nhentai API key on the Scan page first';
-    return 'nhentai request failed — try again';
+    const low = msg.toLowerCase();
+    if (low.includes('api key') || low.includes('source configured')) {
+        return 'Configure a tag source on the Scan page first';
+    }
+    return 'Tag source request failed — try again';
 }
 
 // buildMatchPicker renders the local title's cover beside the ranked candidates for one
@@ -1210,7 +1218,7 @@ function buildMatchPicker(
     const wrap = document.createElement('div');
     wrap.className = 'nh-picker';
     if (res.decision === 'none' || !res.candidates.length) {
-        wrap.innerHTML = `<p class="nh-empty">No nhentai matches found.</p>`;
+        wrap.innerHTML = `<p class="nh-empty">No matches found.</p>`;
         return wrap;
     }
     const auto = res.decision === 'auto';
@@ -1225,10 +1233,20 @@ function buildMatchPicker(
             res.local_tags.length > 24 ? `<span class="nh-more">+${res.local_tags.length - 24} more</span>` : ''}</div>`
         : `<div class="nh-local-tags nh-local-notags">no tags yet</div>`;
     const mergeCount = res.merge_gallery_ids?.length || 0;
+    // Which site these candidates came from. A bare "#12345" is ambiguous once more than
+    // one source is in play — two sites can use the same numeric id — so the picker names
+    // its source, and applying sends that slug back (never the active one).
+    const srcLabels = [...new Set(res.candidates.map((c) => c.source_label).filter(Boolean))];
+    const mixedSources = srcLabels.length > 1;
+    const srcTag = res.source_label
+        ? `<span class="nh-src">${esc(res.source_label)}</span>`
+        : '';
     const headHTML = auto
-        ? `<div class="nh-auto"><p class="nh-picker-head">Auto-matched — merges tags from ${mergeCount} galler${mergeCount === 1 ? 'y' : 'ies'}.</p>
+        ? `<div class="nh-auto"><p class="nh-picker-head">Auto-matched${srcTag ? ' from ' + srcTag : ''} — merges tags from ${mergeCount} galler${mergeCount === 1 ? 'y' : 'ies'}.</p>
              <button type="button" class="btn btn-primary nh-merge">Apply matched tags</button></div>`
-        : `<p class="nh-picker-head">Multiple possible matches — pick the right one:</p>`;
+        : mixedSources
+            ? `<p class="nh-picker-head">Possible matches across ${esc(srcLabels.join(', '))} — pick the right one:</p>`
+            : `<p class="nh-picker-head">Multiple possible matches${srcTag ? ' on ' + srcTag : ''} — pick the right one:</p>`;
 
     wrap.innerHTML = `
         <div class="nh-local">${localCover}
@@ -1250,8 +1268,8 @@ function buildMatchPicker(
             disableAll(true);
             mergeBtn.textContent = 'Applying…';
             try {
-                const saved = await ApplyNhentaiMerge(mangaId, res.merge_gallery_ids);
-                toast('Tags applied from nhentai');
+                const saved = await ApplySourceMerge(mangaId, res.source_slug, res.merge_gallery_ids);
+                toast('Tags applied');
                 onApplied(saved);
             } catch (err) {
                 console.error(err);
@@ -1264,13 +1282,26 @@ function buildMatchPicker(
 
     res.candidates.forEach((c) => {
         const merged = (res.merge_gallery_ids || []).includes(c.gallery_id);
-        const pages = c.pages_exact
-            ? `<span class="nh-pages ok">${c.num_pages}p · exact (vs ${res.local_pages}p)</span>`
-            : `<span class="nh-pages">${c.num_pages}p (you have ${res.local_pages}p)</span>`;
+        // num_pages 0 means the source does not report one, not an empty gallery — MangaDex
+        // indexes series, which have chapters rather than a single page count. Rendering it
+        // as "0p" read as a broken result; it also means this candidate can never earn the
+        // page bonus or the page-corroborated auto-apply routes (see autotag.qualifies).
+        const pages = !c.num_pages
+            ? `<span class="nh-pages muted">page count n/a (you have ${res.local_pages}p)</span>`
+            : c.pages_exact
+                ? `<span class="nh-pages ok">${c.num_pages}p · exact (vs ${res.local_pages}p)</span>`
+                : `<span class="nh-pages">${c.num_pages}p (you have ${res.local_pages}p)</span>`;
         const jp = c.japanese_title ? `<span class="nh-jp">${esc(c.japanese_title)}</span>` : '';
         const tags = (c.tags && c.tags.length)
             ? `<div class="nh-tags">${renderTagChips(c.tags.slice(0, 24))}${
                 c.tags.length > 24 ? `<span class="nh-more">+${c.tags.length - 24} more</span>` : ''}</div>`
+            : '';
+        // A review shortlist pools candidates from every source that found something, so
+        // each row names its own site — "#12345" means different galleries on different
+        // sites. Only shown when the list actually mixes sources; a single-source list
+        // already says so in the header.
+        const candSrc = mixedSources && c.source_label
+            ? `<span class="nh-src-chip">${esc(c.source_label)}</span> `
             : '';
         const row = document.createElement('div');
         row.className = 'nh-cand'
@@ -1280,9 +1311,9 @@ function buildMatchPicker(
         row.innerHTML = `
             <div class="nh-cover-wrap"><img class="nh-cover"></div>
             <div class="nh-cand-main">
-                <button type="button" class="nh-en nh-link" title="Open on nhentai">${esc(c.english_title || c.japanese_title || ('gallery #' + c.gallery_id))}</button>
+                <button type="button" class="nh-en nh-link" title="Open in browser">${esc(c.english_title || c.japanese_title || ('gallery #' + c.gallery_id))}</button>
                 ${jp}
-                <span class="nh-meta">${pages} · ♥ ${c.num_favorites} · #${c.gallery_id}</span>
+                <span class="nh-meta">${candSrc}${pages} · ♥ ${c.num_favorites} · #${c.gallery_id}</span>
                 ${renderMatchBadges(c)}
                 ${tags}
             </div>
@@ -1296,8 +1327,10 @@ function buildMatchPicker(
             disableAll(true);
             applyBtn.textContent = 'Applying…';
             try {
-                const saved = await ApplyNhentaiTags(mangaId, c.gallery_id);
-                toast('Tags applied from nhentai');
+                // The CANDIDATE's source, not the result's: a pooled shortlist mixes them,
+                // and a ref only resolves against the site that issued it.
+                const saved = await ApplySourceTags(mangaId, c.source_slug || res.source_slug, c.gallery_id);
+                toast('Tags applied');
                 onApplied(saved);
             } catch (err) {
                 console.error(err);
@@ -1463,21 +1496,42 @@ function showContextMenu(x: number, y: number, items: { label: string; run: () =
 }
 
 // ───── scan / ingest view ─────────────────────────────────────────
-function scanMarkup(count: number, roots: string[], hasKey: boolean, missing: number): string {
+
+// sourceSettings renders the tag-source picker: a dropdown of the built-in sources
+// (nhentai, MangaDex, …), a password field for a key-requiring source (only nhentai
+// needs one — MangaDex has an open API), and a ready/needs-key state chip that reveals
+// the Auto-tag link once the active source can actually run.
+//
+// An id_only source (hitomi, e-hentai) has no free-text search at all, so a bulk sweep can
+// only match titles whose folder carries the gallery ref. Saying so here is the difference
+// between an understood limitation and an app that looks broken. The ref *form* comes from
+// the backend (ref_hint) rather than being built as "<slug>-<id>": e-hentai needs a gid and
+// a token, so a guessed single-id form would document a name that never matches.
+function sourceSettings(st: main.Settings, sources: main.SourceState[]): string {
+    const active = sources.find((s) => s.slug === st.active_source) || sources[0];
+    const options = sources.map((s) =>
+        `<option value="${esc(s.slug)}"${active && s.slug === active.slug ? ' selected' : ''}>${esc(s.label)}</option>`).join('');
+    const picker = `<select class="src-select" aria-label="Tag source">${options}</select>`;
+    const keyField = active && active.needs_key
+        ? `<input type="password" class="nh-key-input" placeholder="${active.has_key ? '•••••••• (replace)' : 'paste your personal key'}" autocomplete="off" spellcheck="false">
+           <button type="button" class="btn" data-save-key>Save key</button>`
+        : `<span class="nh-key-state">no key required</span>`;
+    const state = st.active_source_ready
+        ? `<span class="nh-key-state ok">ready</span> <a class="nh-autotag-link" href="#/autotag">Auto-tag library →</a>`
+        : (active && active.needs_key ? `<span class="nh-key-state">no key set — needed for auto-tagging</span>` : '');
+    const idOnly = active && active.id_only
+        ? `<span class="nh-key-state note">no search — matches only folders named <code>${esc(active.ref_hint || `${active.slug}-<id>`)}</code></span>`
+        : '';
+    return `<div class="settings nh-settings"><span class="label">Tag source</span> ${picker} ${keyField} ${state}${idOnly}</div>`;
+}
+
+function scanMarkup(count: number, roots: string[], st: main.Settings, sources: main.SourceState[], missing: number): string {
     const rootChips = roots.length
         ? roots.map((r) =>
             `<span class="chip">${esc(r)}<a href="#" class="chip-x" data-remove-root="${esc(r)}" aria-label="Remove folder">×</a></span>`).join(' ')
         : `<span class="roots">No library folders yet — add one to start scanning.</span>`;
     const folderSettings = `<div class="settings"><span class="label">Library folders</span> ${rootChips}
         <button type="button" class="btn" data-add-root>Add folder…</button></div>`;
-    // nhentai API key: entered here (password field), stored in config; never echoed
-    // back. When a key is set, the auto-tag sweep becomes available.
-    const keyState = hasKey
-        ? `<span class="nh-key-state ok">key configured</span> <a class="nh-autotag-link" href="#/autotag">Auto-tag library →</a>`
-        : `<span class="nh-key-state">no key set — needed for auto-tagging</span>`;
-    const keySettings = `<div class="settings nh-settings"><span class="label">nhentai API key</span>
-        <input type="password" class="nh-key-input" placeholder="${hasKey ? '•••••••• (replace)' : 'paste your personal key'}" autocomplete="off" spellcheck="false">
-        <button type="button" class="btn" data-save-key>Save key</button> ${keyState}</div>`;
     // Maintenance: titles whose folders vanished from disk are kept (never auto-deleted),
     // so moving/removing folders leaves "missing" rows. This is the one place to clear them.
     const maintenance = missing > 0
@@ -1485,7 +1539,7 @@ function scanMarkup(count: number, roots: string[], hasKey: boolean, missing: nu
             <span class="missing-note">${missing} missing title${missing === 1 ? '' : 's'} — folders gone from disk</span>
             <button type="button" class="btn btn-danger" data-remove-missing>Remove missing</button></div>`
         : '';
-    const settings = folderSettings + keySettings + maintenance;
+    const settings = folderSettings + sourceSettings(st, sources) + maintenance;
     const header = `
     <header class="scan-header">
         <div>
@@ -1573,10 +1627,23 @@ function ingestRow(p: UnimportedPreview): HTMLElement {
 }
 
 async function renderScan(): Promise<void> {
-    const [found, cfg, settings, missing] = await Promise.all([
-        GetUnimported(), GetConfig(), GetSettings(), CountMissing(),
+    const [found, cfg, settings, sources, missing] = await Promise.all([
+        GetUnimported(), GetConfig(), GetSettings(), GetSources(), CountMissing(),
     ]);
-    viewEl().innerHTML = scanMarkup(found.length, cfg.library_roots, settings.has_nhentai_key, missing);
+    viewEl().innerHTML = scanMarkup(found.length, cfg.library_roots, settings, sources, missing);
+
+    // Switch the active tag source. SetActiveSource enables the chosen provider if it
+    // wasn't configured yet (MangaDex needs no key), so picking it just works.
+    const srcSelect = viewEl().querySelector('.src-select') as HTMLSelectElement | null;
+    srcSelect?.addEventListener('change', async () => {
+        try {
+            await SetActiveSource(srcSelect.value);
+            render();
+        } catch (err) {
+            console.error(err);
+            toast('Could not switch source', 'err');
+        }
+    });
 
     // Remove missing titles. Two-step: the first click arms the button (since this drops
     // those titles' tags/nhentai links — recoverable only by re-scanning the folders).
@@ -1617,8 +1684,10 @@ async function renderScan(): Promise<void> {
         if (!v) { toast('Enter a key first', 'err'); return; }
         saveKeyBtn.disabled = true;
         try {
-            await SetNhentaiKey(v);
-            toast('nhentai key saved');
+            // Save the key against the active (key-requiring) source and enable it.
+            const slug = settings.active_source || 'nhentai';
+            await SetSourceConfig(slug, v, settings.nhentai_user_agent || '', true);
+            toast('Key saved');
             render();
         } catch (err) {
             console.error(err);
@@ -1682,6 +1751,7 @@ interface ATProgress {
     manga_id: number;
     title: string;
     outcome: string;
+    source: string;
     detail: string;
 }
 interface ATDone {
@@ -1691,20 +1761,20 @@ interface ATDone {
     cancelled: boolean;
 }
 
-function autotagMarkup(hasKey: boolean): string {
-    if (!hasKey) {
+function autotagMarkup(ready: boolean, label: string): string {
+    if (!ready) {
         return `<section class="at-page">
             <a class="back-link" href="#/scan">← Scan &amp; settings</a>
-            <h1>Auto-tag from nhentai</h1>
-            <p class="empty">No nhentai API key set. Add your personal key on the
-                <a href="#/scan">Scan</a> page to enable auto-tagging.</p>
+            <h1>Auto-tag library</h1>
+            <p class="empty">No tag source is ready. Pick a source (and add its API key if
+                it needs one) on the <a href="#/scan">Scan</a> page to enable auto-tagging.</p>
         </section>`;
     }
     return `<section class="at-page">
         <a class="back-link" href="#/scan">← Scan &amp; settings</a>
-        <h1>Auto-tag from nhentai</h1>
-        <p class="at-intro">Searches nhentai for each title, auto-applies confident
-            matches (exact page count + strong title match), and queues the rest for you
+        <h1>Auto-tag library</h1>
+        <p class="at-intro">Starts with ${esc(label)} for each title, auto-applies confident
+            matches (strong title + artist/page match), and queues the rest for you
             to confirm below. Requests are rate-limited, so a large library takes a while.</p>
         <div class="at-controls">
             <label class="at-resync"><input type="checkbox" data-resync> Re-tag titles already linked</label>
@@ -1715,6 +1785,7 @@ function autotagMarkup(hasKey: boolean): string {
                     <option value="japanese">Japanese only</option>
                 </select>
             </label>
+            <label class="at-resync" title="A folder named &lt;source&gt;-&lt;id&gt; always goes to that source, either way."><input type="checkbox" data-fallback checked> Try other enabled sources when ${esc(label)} finds nothing</label>
             <button type="button" class="btn btn-primary" data-start>Start auto-tagging</button>
             <button type="button" class="btn" data-cancel hidden>Cancel</button>
         </div>
@@ -1768,16 +1839,17 @@ function renderReviewQueue(
 
 async function renderAutotag(): Promise<void> {
     const settings = await GetSettings();
-    viewEl().innerHTML = autotagMarkup(settings.has_nhentai_key);
+    viewEl().innerHTML = autotagMarkup(settings.active_source_ready, settings.active_source_label || 'the source');
     // The reader's back link follows lastBrowseHash, so record this page: leaving a
     // review title to inspect it returns here (to the restored queue), not to "/".
     lastBrowseHash = '#/autotag';
-    if (!settings.has_nhentai_key) { viewCleanup = null; return; }
+    if (!settings.active_source_ready) { viewCleanup = null; return; }
 
     const startBtn = viewEl().querySelector('[data-start]') as HTMLButtonElement;
     const cancelBtn = viewEl().querySelector('[data-cancel]') as HTMLButtonElement;
     const resync = viewEl().querySelector('[data-resync]') as HTMLInputElement;
     const langMode = viewEl().querySelector('[data-langmode]') as HTMLSelectElement;
+    const fallback = viewEl().querySelector('[data-fallback]') as HTMLInputElement;
     const barWrap = viewEl().querySelector('.at-progress') as HTMLElement;
     const bar = viewEl().querySelector('.at-bar-fill') as HTMLElement;
     const statusEl = viewEl().querySelector('.at-status') as HTMLElement;
@@ -1843,8 +1915,11 @@ async function renderAutotag(): Promise<void> {
             const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
             bar.style.width = pct + '%';
             statusEl.textContent = `${p.done} / ${p.total} — ${p.title}`;
-            const label = p.outcome === 'applied' ? `✓ ${p.title} → ${p.detail}`
-                : p.outcome === 'review' ? `? ${p.title} — needs review${p.detail ? ' · ' + p.detail : ''}`
+            // Name the winning source: with a chain, "applied" alone no longer says which
+            // site the tags came from.
+            const src = p.source ? ` [${p.source}]` : '';
+            const label = p.outcome === 'applied' ? `✓ ${p.title}${src} → ${p.detail}`
+                : p.outcome === 'review' ? `? ${p.title}${src} — needs review${p.detail ? ' · ' + p.detail : ''}`
                 : p.outcome === 'none' ? `– ${p.title} — no match${p.detail ? ' · ' + p.detail : ''}`
                 : `✗ ${p.title} — ${p.detail}`;
             logLine(p.outcome, label);
@@ -1863,7 +1938,13 @@ async function renderAutotag(): Promise<void> {
         });
 
         try {
-            await StartAutoTag({ resync: resync.checked, language_mode: langMode.value });
+            // fallback is sent explicitly: the Go field is a plain bool with no unset
+            // state, so omitting it would silently mean "off".
+            await StartAutoTag({
+                resync: resync.checked,
+                language_mode: langMode.value,
+                fallback: fallback.checked,
+            });
         } catch (err) {
             console.error(err);
             detach();

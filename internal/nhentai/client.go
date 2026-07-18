@@ -1,11 +1,14 @@
-// Package nhentai is a small, rate-limited REST client for the nhentai v2 API.
-// The app uses it to look up galleries by free-text query and read their typed
-// tags, so those tags can be copied onto local titles (see internal/autotag for
-// the matching logic and app.go for the bound methods that drive it).
+// Package nhentai is a small, rate-limited REST client for the nhentai v2 API and
+// one implementation of source.Provider. The app uses it to look up galleries by
+// free-text query and read their typed tags, so those tags can be copied onto local
+// titles (see internal/autotag for the matching logic and the root tagging.go for
+// the bound methods that drive it).
 //
-// Two endpoints matter: /search returns lightweight list items (titles, page
-// count, and tag *ids* only), and /galleries/{id} returns the full gallery with
-// named, typed tags. Matching uses search; applying tags needs the detail call.
+// Two endpoints matter: /search returns lightweight list items (titles, page count,
+// and tag *ids* only), and /galleries/{id} returns the full gallery with named,
+// typed tags. Matching uses search; applying tags needs the detail call. Both are
+// decoded into private DTOs and mapped onto the neutral source.* types, with each
+// nhentai tag "type" normalized to a tag.Subject on the way out.
 //
 // The client throttles every request through one shared limiter to stay under
 // nhentai's authenticated ceiling (search 20/min, detail 45/min) and honours
@@ -24,9 +27,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"doujin/internal/source"
+	"doujin/internal/tag"
 )
 
 const (
+	// Slug is the stable machine id stored in config + the manga.source_slug link
+	// column; Label is the human name shown in the UI.
+	Slug  = "nhentai"
+	Label = "nhentai"
+
 	defaultBaseURL = "https://nhentai.net/api/v2"
 
 	// defaultInterval spaces all requests through the single limiter. The tightest
@@ -39,15 +50,12 @@ const (
 )
 
 // ErrNoKey is returned by request methods when no API key is configured. The
-// caller (app.go) surfaces this to the UI as "enter your key in Settings".
+// caller surfaces this to the UI as "enter your key in Settings".
 var ErrNoKey = errors.New("nhentai: no API key configured")
 
-// SearchResult is one gallery in a /search response. The matcher's fields plus the
-// cover identifiers: MediaID keys nhentai's public image CDN
-// (t.nhentai.net/galleries/{media_id}/thumb.<ext>) so the review UI can show a cover
-// without a detail fetch, and Thumbnail is the absolute URL when the API supplies one.
-// Note tags arrive here as ids only — names require GalleryByID.
-type SearchResult struct {
+// nhSearchResult is one gallery in a /search response. Tags arrive here as ids only —
+// names require a detail fetch — so the mapped source.SearchResult carries no tags.
+type nhSearchResult struct {
 	ID            int64   `json:"id"`
 	MediaID       string  `json:"media_id"`
 	EnglishTitle  string  `json:"english_title"`
@@ -58,17 +66,17 @@ type SearchResult struct {
 	TagIDs        []int64 `json:"tag_ids"`
 }
 
-// SearchResponse is the /search envelope.
-type SearchResponse struct {
-	Result   []SearchResult `json:"result"`
-	NumPages int            `json:"num_pages"`
-	PerPage  int            `json:"per_page"`
-	Total    int            `json:"total"`
+// nhSearchResponse is the /search envelope.
+type nhSearchResponse struct {
+	Result   []nhSearchResult `json:"result"`
+	NumPages int              `json:"num_pages"`
+	PerPage  int              `json:"per_page"`
+	Total    int              `json:"total"`
 }
 
-// Tag is one typed tag on a gallery detail. Type is one of
+// nhTag is one typed tag on a gallery detail. Type is one of
 // tag, artist, group, parody, character, language, category.
-type Tag struct {
+type nhTag struct {
 	ID    int64  `json:"id"`
 	Type  string `json:"type"`
 	Name  string `json:"name"`
@@ -76,24 +84,24 @@ type Tag struct {
 	Count int    `json:"count"`
 }
 
-// GalleryDetail is a /galleries/{id} response. Unlike search list items, its title
+// nhGalleryDetail is a /galleries/{id} response. Unlike search list items, its title
 // is an object and its tags carry names + types.
-type GalleryDetail struct {
+type nhGalleryDetail struct {
 	ID    int64 `json:"id"`
 	Title struct {
 		English  string `json:"english"`
 		Japanese string `json:"japanese"`
 		Pretty   string `json:"pretty"`
 	} `json:"title"`
-	MediaID   string `json:"media_id"` // keys the cover CDN, like SearchResult.MediaID
-	NumPages  int    `json:"num_pages"`
-	Scanlator string `json:"scanlator"`
-	Tags      []Tag  `json:"tags"`
+	MediaID   string  `json:"media_id"`
+	NumPages  int     `json:"num_pages"`
+	Scanlator string  `json:"scanlator"`
+	Tags      []nhTag `json:"tags"`
 }
 
-// Client is a rate-limited nhentai v2 client. The zero value is not usable; build
-// one with NewClient. It is safe for concurrent use, though the shared limiter
-// serializes requests.
+// Client is a rate-limited nhentai v2 client implementing source.Provider. The zero
+// value is not usable; build one with NewClient. It is safe for concurrent use,
+// though the shared limiter serializes requests.
 type Client struct {
 	apiKey    string
 	userAgent string
@@ -119,30 +127,102 @@ func NewClient(apiKey, userAgent string) *Client {
 	}
 }
 
-// Search runs a free-text gallery search. page is 1-based; values below 1 are
-// clamped to 1. The query supports nhentai's search syntax (quoted phrases,
-// artist:/pages: filters, etc.), but callers typically pass a plain title.
-func (c *Client) Search(ctx context.Context, query string, page int) (*SearchResponse, error) {
+// Slug and Label identify the provider (source.Provider).
+func (c *Client) Slug() string  { return Slug }
+func (c *Client) Label() string { return Label }
+
+// galleryURL builds the public gallery page URL for a gallery id.
+func galleryURL(id int64) string { return fmt.Sprintf("https://nhentai.net/g/%d/", id) }
+
+// buildQuery renders a neutral source.SearchQuery into nhentai's own search syntax
+// (quoted phrases, artist:/title:/language: filters). This is the only place in the app
+// that speaks it — everything above internal/source describes what it wants instead.
+//
+// The shape follows what the site actually indexes. Free text only matches a gallery's
+// primary (romaji/japanese) title, so a query with no artist goes out as bare free text;
+// once an artist tag constrains the search, the title is sent as the title:"…" field
+// filter it should be. That rule is deliberate, not incidental — it is what lets one
+// struct reproduce both shapes the matcher's ladder emits.
+//
+// A language never rides alone: "language:english" with nothing to search for would match
+// every English gallery on the site, so an empty query stays empty.
+func buildQuery(q source.SearchQuery) string {
+	var parts []string
+	artist := strings.TrimSpace(q.Artist)
+	title := strings.TrimSpace(q.Title)
+	switch {
+	case artist != "":
+		parts = append(parts, `artist:"`+artist+`"`)
+		if title != "" {
+			parts = append(parts, `title:"`+title+`"`)
+		}
+	case title != "":
+		parts = append(parts, title)
+	}
+	if lang := strings.TrimSpace(q.Language); lang != "" && len(parts) > 0 {
+		parts = append(parts, "language:"+lang)
+	}
+	return strings.Join(parts, " ")
+}
+
+// Search runs a gallery search. sq.Page is 1-based; values below 1 are clamped to 1.
+// The neutral query is rendered into nhentai's own syntax by buildQuery.
+func (c *Client) Search(ctx context.Context, sq source.SearchQuery) (*source.SearchResponse, error) {
+	page := sq.Page
 	if page < 1 {
 		page = 1
 	}
 	q := url.Values{}
-	q.Set("query", query)
+	q.Set("query", buildQuery(sq))
 	q.Set("page", strconv.Itoa(page))
-	var out SearchResponse
+	var out nhSearchResponse
 	if err := c.do(ctx, "/search?"+q.Encode(), &out); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	res := make([]source.SearchResult, 0, len(out.Result))
+	for _, r := range out.Result {
+		res = append(res, source.SearchResult{
+			ID:            strconv.FormatInt(r.ID, 10),
+			MediaID:       r.MediaID,
+			EnglishTitle:  r.EnglishTitle,
+			JapaneseTitle: r.JapaneseTitle,
+			NumPages:      r.NumPages,
+			NumFavorites:  r.NumFavorites,
+			Thumbnail:     r.Thumbnail,
+			GalleryURL:    galleryURL(r.ID),
+			// Tags: nil — search returns tag ids only; names come from GalleryByID.
+		})
+	}
+	return &source.SearchResponse{Result: res, NumPages: out.NumPages, Total: out.Total}, nil
 }
 
 // GalleryByID fetches one gallery's full detail, including its named, typed tags.
-func (c *Client) GalleryByID(ctx context.Context, id int64) (*GalleryDetail, error) {
-	var out GalleryDetail
-	if err := c.do(ctx, "/galleries/"+strconv.FormatInt(id, 10), &out); err != nil {
+// id is the string gallery id (source.Provider); a non-numeric id is an error.
+func (c *Client) GalleryByID(ctx context.Context, id string) (*source.GalleryDetail, error) {
+	gid, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("nhentai: bad gallery id %q: %w", id, err)
+	}
+	var out nhGalleryDetail
+	if err := c.do(ctx, "/galleries/"+strconv.FormatInt(gid, 10), &out); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	tags := make([]tag.Typed, 0, len(out.Tags))
+	for _, t := range out.Tags {
+		// Map nhentai's tag "type" onto our subject vocabulary; names are left as the
+		// site supplies them (the apply path normalizes + dedupes them).
+		tags = append(tags, tag.Typed{Name: t.Name, Type: tag.Normalize(t.Type)})
+	}
+	return &source.GalleryDetail{
+		ID:            strconv.FormatInt(out.ID, 10),
+		MediaID:       out.MediaID,
+		EnglishTitle:  out.Title.English,
+		JapaneseTitle: out.Title.Japanese,
+		PrettyTitle:   out.Title.Pretty,
+		GalleryURL:    galleryURL(out.ID),
+		NumPages:      out.NumPages,
+		Tags:          tags,
+	}, nil
 }
 
 // do performs a throttled GET against base+path and decodes the JSON body into

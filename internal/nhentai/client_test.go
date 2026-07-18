@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"doujin/internal/source"
 )
 
 // testClient points a fresh client at srv with a tiny throttle interval so the
@@ -41,6 +43,55 @@ const detailBody = `{
   ]
 }`
 
+// buildQuery is the only place in the app that speaks nhentai's search syntax, so it must
+// reproduce every shape the matcher's ladder emits, byte for byte. The table below IS that
+// ladder: primary title variant, artist narrowed by the first title word, the bare artist
+// catalog, and each of those under a language filter.
+//
+// The last case is load-bearing rather than cosmetic: a lone "language:english" is not a
+// search, it matches every English gallery on the site, so an otherwise-empty query must
+// render empty and never be sent.
+func TestBuildQueryRendersNhentaiSyntax(t *testing.T) {
+	cases := []struct {
+		name string
+		q    source.SearchQuery
+		want string
+	}{
+		{"bare title", source.SearchQuery{Title: "A Little Sister's Warmth"}, `A Little Sister's Warmth`},
+		{"title + language", source.SearchQuery{Title: "Some Title", Language: "english"}, `Some Title language:english`},
+		{"artist + title word", source.SearchQuery{Artist: "kinomoto anzu", Title: "little"}, `artist:"kinomoto anzu" title:"little"`},
+		{"bare artist catalog", source.SearchQuery{Artist: "kinomoto anzu"}, `artist:"kinomoto anzu"`},
+		{"artist + language", source.SearchQuery{Artist: "kinomoto anzu", Language: "english"}, `artist:"kinomoto anzu" language:english`},
+		{"language alone renders empty", source.SearchQuery{Language: "english"}, ``},
+		{"whitespace only renders empty", source.SearchQuery{Title: "   ", Language: "english"}, ``},
+	}
+	for _, c := range cases {
+		if got := buildQuery(c.q); got != c.want {
+			t.Errorf("%s: buildQuery(%+v) = %q, want %q", c.name, c.q, got, c.want)
+		}
+	}
+}
+
+// The rendered syntax must actually reach the wire — buildQuery being correct in isolation
+// is no use if Search sends something else.
+func TestSearchSendsBuiltQuery(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(searchBody))
+	}))
+	defer srv.Close()
+
+	q := source.SearchQuery{Artist: "some artist", Title: "little", Language: "english", Page: 1}
+	if _, err := testClient(srv).Search(context.Background(), q); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	want := `artist:"some artist" title:"little" language:english`
+	if gotQuery != want {
+		t.Errorf("query = %q, want %q", gotQuery, want)
+	}
+}
+
 func TestSearchDecodesAndSetsHeaders(t *testing.T) {
 	var gotAuth, gotUA, gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +105,7 @@ func TestSearchDecodesAndSetsHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := testClient(srv).Search(context.Background(), "naruto", 1)
+	resp, err := testClient(srv).Search(context.Background(), source.SearchQuery{Title: "naruto", Page: 1})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -71,7 +122,7 @@ func TestSearchDecodesAndSetsHeaders(t *testing.T) {
 		t.Fatalf("got %d results, want 1", len(resp.Result))
 	}
 	g := resp.Result[0]
-	if g.ID != 653427 || g.NumPages != 50 || g.EnglishTitle == "" {
+	if g.ID != "653427" || g.NumPages != 50 || g.EnglishTitle == "" {
 		t.Errorf("decoded result wrong: %+v", g)
 	}
 	// The cover identifiers must decode so the review UI can show a thumbnail.
@@ -81,8 +132,10 @@ func TestSearchDecodesAndSetsHeaders(t *testing.T) {
 	if g.Thumbnail != "https://t.nhentai.net/galleries/123/thumb.jpg" {
 		t.Errorf("thumbnail = %q", g.Thumbnail)
 	}
-	if len(g.TagIDs) != 2 {
-		t.Errorf("tag_ids = %v, want 2 ids", g.TagIDs)
+	// The provider builds an absolute gallery URL (search returns tag ids only, so no
+	// tag names come back on a list item).
+	if g.GalleryURL != "https://nhentai.net/g/653427/" {
+		t.Errorf("gallery_url = %q", g.GalleryURL)
 	}
 }
 
@@ -95,16 +148,18 @@ func TestGalleryByIDDecodesTypedTags(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := testClient(srv).GalleryByID(context.Background(), 653427)
+	d, err := testClient(srv).GalleryByID(context.Background(), "653427")
 	if err != nil {
 		t.Fatalf("GalleryByID: %v", err)
 	}
-	if d.Title.English != "Karakishi Youhei-dan Compilation" {
-		t.Errorf("english title = %q", d.Title.English)
+	if d.EnglishTitle != "Karakishi Youhei-dan Compilation" {
+		t.Errorf("english title = %q", d.EnglishTitle)
 	}
 	if len(d.Tags) != 3 {
 		t.Fatalf("got %d tags, want 3", len(d.Tags))
 	}
+	// Tags arrive already mapped onto our subject vocabulary (nhentai's "parody" type
+	// normalizes to tag.Parody, which is the same "parody" string).
 	if d.Tags[1].Type != "parody" || d.Tags[1].Name != "naruto" {
 		t.Errorf("tag[1] = %+v, want parody/naruto", d.Tags[1])
 	}
@@ -125,7 +180,7 @@ func TestRetriesOn429ThenSucceeds(t *testing.T) {
 	c := testClient(srv)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	resp, err := c.Search(ctx, "naruto", 1)
+	resp, err := c.Search(ctx, source.SearchQuery{Title: "naruto", Page: 1})
 	if err != nil {
 		t.Fatalf("Search after 429: %v", err)
 	}
@@ -147,7 +202,7 @@ func TestThrottleSpacesRequests(t *testing.T) {
 	c.interval = 60 * time.Millisecond
 	start := time.Now()
 	for i := range 3 {
-		if _, err := c.Search(context.Background(), "x", 1); err != nil {
+		if _, err := c.Search(context.Background(), source.SearchQuery{Title: "x", Page: 1}); err != nil {
 			t.Fatalf("Search %d: %v", i, err)
 		}
 	}
@@ -159,7 +214,7 @@ func TestThrottleSpacesRequests(t *testing.T) {
 
 func TestNoKeyReturnsErrNoKey(t *testing.T) {
 	c := NewClient("", "TestAgent/1.0")
-	if _, err := c.Search(context.Background(), "x", 1); !errors.Is(err, ErrNoKey) {
+	if _, err := c.Search(context.Background(), source.SearchQuery{Title: "x", Page: 1}); !errors.Is(err, ErrNoKey) {
 		t.Errorf("err = %v, want ErrNoKey", err)
 	}
 }
@@ -170,7 +225,7 @@ func TestNon2xxReturnsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := testClient(srv).Search(context.Background(), "x", 1)
+	_, err := testClient(srv).Search(context.Background(), source.SearchQuery{Title: "x", Page: 1})
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Errorf("err = %v, want a 403 error", err)
 	}

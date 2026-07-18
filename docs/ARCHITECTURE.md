@@ -126,6 +126,67 @@ open `*sql.Rows` and issue an `Exec` on the same DB — both need the one connec
 and would deadlock. Read all rows into a slice and close the cursor *before*
 writing. `App.Rescan` does exactly this; follow the pattern.
 
+### 10. Tag fetching goes through `source.Provider`
+
+Every path that copies tags from an online source — the interactive `MatchSource`,
+the bulk `StartAutoTag` sweep, the manual apply — fetches through the
+`source.Provider` interface (`internal/source`) and scores **neutral** types:
+`source.SearchResult` / `GalleryDetail` and `tag.Typed`, never a site's JSON. Each
+site's quirks (nhentai's int ids + search syntax, mangadex's UUIDs + relationship
+authors) are mapped to the neutral model *inside* its client (`internal/nhentai`,
+`internal/mangadex`); the matcher (`internal/autotag`) and the apply path stay
+site-agnostic. *Why:* adding a source is implementing one interface, not editing the
+matcher.
+
+Searching is structured for the same reason: callers pass a `source.SearchQuery`
+(`{Title, Artist, Language, Page}`) describing *what* they want, and each provider
+renders it into its own wire format — **never a site's query syntax**. nhentai's
+`artist:"x" title:"y" language:z` is built inside `internal/nhentai` and spoken
+nowhere else; MangaDex maps the same struct onto real API filters (resolving the
+artist to an author UUID). Before this seam existed the matcher emitted nhentai
+syntax and every other provider had to reverse-engineer it, which silently reduced
+MangaDex's artist searches to guaranteed zero-result queries.
+
+Search is explicitly **best-effort**: a provider with no free-text search at all returns
+an empty `SearchResponse` rather than an error, and stays fully useful through the
+`<slug>-<id>` folder shortcut and manual apply. `internal/hitomi` is the reference case
+(hitomi's own search is client-side over binary index files, so there is nothing to
+query; `internal/ehentai` is the second — its API resolves galleries by id only). Such a
+provider sets `providerPreset.IDOnly`, which reaches the Settings picker as
+`SourceState.id_only` — a sweep that can only match id-bearing folders has to *say* so,
+or its "no match" results read as a bug rather than the contract.
+
+The *shape* of a gallery ref is likewise provider knowledge, carried as
+`providerPreset.RefHint` → `SourceState.ref_hint`. It is not uniform — e-hentai needs a
+gid **and** a token, so the UI cannot build its own `<slug>-<id>` example without
+documenting a folder name that never matches. The hints are pinned to what
+`internal/doujin`'s `sourceDefs` actually parses by a test, because the parser is a leaf
+package that cannot import the registry and the two would otherwise drift in silence.
+
+A sweep consults an ordered **chain** of providers, not one: a `<slug>-<id>` folder name
+routes to that slug's provider even when another is active, and a title with no id walks
+the enabled sources until one matches. The chain holds **one `autoTagRun` per provider**,
+and that is load-bearing — a run's `searchCache` is keyed by `SearchQuery.CacheKey()` and
+its `detailCache` by bare gallery id, both provider-scoped, so a shared cache would serve
+one site's gallery for another's identical numeric id.
+
+An **auto-apply never spans providers**: the first source to clear the bar wins outright
+and its decision is applied whole. `gatherCandidates` dedupes by bare gallery id with no
+provider namespace and `applyTags` stamps one slug per merge set, so a set drawn from two
+sites would drop colliding ids and mis-record provenance.
+
+A **review does pool**: every source that found candidates contributes to the shortlist,
+grouped by provider in chain order — nothing is being applied yet, so hiding one site's
+options would just withhold the answer. Groups are never interleaved by score, because
+cross-provider scores are not comparable (MangaDex reports `NumPages: 0` for every series,
+so its candidates never earn the page bonus). Provenance therefore rides **per candidate**
+(`SourceCandidate.SourceSlug`), and applying resolves the ref against that provider rather
+than the active source.
+
+The `manga.source_slug` / `source_ref` link columns (migration 007) record
+which provider a title's tags came from as a `(slug, string-id)` pair — the provider-
+agnostic successor to the legacy `nhentai_gallery_id` they backfill from.
+
 ---
 
 ## Module map
@@ -140,14 +201,20 @@ Backend packages under `internal/`. Each has one responsibility.
 | `thumbs` | `imaging` thumbnail generation + disk cache (atomic, placeholder fallback). |
 | `ingest` | Create/link author, manga row, and tags. `NormalizeTag`, dedupe, transactional. `GetOrCreateTag(name, subject)` enriches a tag's subject (upgrade, **never downgrade**), so re-saving a typed tag by name keeps its subject. |
 | `search` | The read chokepoint: `SearchManga`, suggestions, tag/author/manga lookups (incl. `GetMangaTagsTyped` for the subject-grouped detail view), and the `Manga`/`Author`/`Tag` row types. |
-| `tag` | Leaf vocabulary package: the canonical tag **subjects** (`language`, `artist`, `group`, `parody`, `character`, `category`, `tag`, plus `General`) — the same set nhentai uses — with `Typed{Name,Type}`, `Normalize`, `Label`, `Rank`, `Sort`. Shared by the parser-mapping, ingest, search, and nhentai layers with no import cycle. |
+| `tag` | Leaf vocabulary package: the canonical tag **subjects** (`language`, `artist`, `group`, `parody`, `character`, `category`, `tag`, plus `General`) — the same set nhentai uses — with `Typed{Name,Type}`, `Normalize`, `Label`, `Rank`, `Sort`. Shared by the parser-mapping, ingest, search, and provider layers with no import cycle. |
+| `autotag` | Pure, network-free matcher: scores a local title against a provider's neutral `SearchResult`s (cross-language title similarity, with page + language ranking) and decides auto-apply vs. review. Works identically for every provider. |
+| `source` | Leaf provider-neutral **seam**: the `Provider` interface + neutral `SearchResult`/`GalleryDetail`/`SearchResponse` the matcher scores. IDs are strings; search is best-effort (a detail-only site may return nothing). See invariant 10. |
+| `nhentai` / `mangadex` / `hitomi` / `ehentai` | The `source.Provider` implementations — rate-limited HTTP clients that look up galleries and map each site's JSON + tags onto the neutral types and the shared `tag.Subject` vocabulary. `hitomi` and `ehentai` are id-only (empty `Search`); `hitomi` parses a JS `var galleryinfo = {…}` document rather than JSON, and `ehentai` POSTs its `gdata` API and identifies a gallery by a `gid/token` **pair** rather than a single id. Add a source by adding a package here. |
 | `paths` | `IsWithinRoots` path-traversal guard. |
 | `stash` | Saved pages ("tabs"): CRUD over the `stash` table. An entry is a `hash` + `label` + `kind` (`search`\|`title`); title entries `LEFT JOIN manga`/`authors` for card display and own a `last_page` resume position (`ON DELETE CASCADE` with `manga`). Uses the `store.Querier` style. |
 
 Root `main` package: `app.go` (bound methods — the thin API layer that
-validates/clamps input and calls the packages above), `assets.go` (binary file
-handler), `main.go` (Wails wiring). Business logic lives in `internal/`, which
-keeps it unit-testable without a running window.
+validates/clamps input and calls the packages above), `nhentai.go` (the tag-matching
+bound methods that drive `internal/autotag` over a chain of `source.Provider`s — the name
+predates both the chain and the multi-provider seam), `providers.go`
+(the provider registry, chain construction + source-config bound methods), `assets.go` (binary file
+handler), `main.go` (Wails wiring). Business logic lives in `internal/`, which keeps
+it unit-testable without a running window.
 
 ---
 
@@ -206,6 +273,9 @@ the app opens it with no migration needed.
 - **New way to slice the library?** Extend `search.SearchManga`, don't write a
   parallel query. Keep `sort` allow-listed.
 - **New schema?** Append a migration; add a `store_test.go` test.
+- **New tag source (metadata site)?** Add an `internal/<site>` package implementing
+  `source.Provider` and register it in `providers.go`; the matcher is untouched
+  (invariant 10).
 - **Serving a file by path?** Call `paths.IsWithinRoots` first.
 - **New frontend↔backend call?** Add an exported method on `App` and rebuild
   (`wails build` / `wails generate module`) so the typed bindings regenerate. Don't

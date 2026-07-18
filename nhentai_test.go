@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"doujin/internal/autotag"
 	"doujin/internal/ingest"
-	"doujin/internal/nhentai"
 	"doujin/internal/scanner"
 	"doujin/internal/search"
+	"doujin/internal/source"
 	"doujin/internal/store"
 	"doujin/internal/tag"
 )
@@ -43,6 +43,28 @@ func tagTypes(ts []tag.Typed) map[string]string {
 	return m
 }
 
+// candLangResolver prefers a provider-supplied Language (MangaDex) and otherwise falls
+// back to detecting a [language] decoration off the titles (nhentai). The field wins even
+// when a title decoration would say something else, so a provider's own answer is trusted.
+func TestCandLangResolver(t *testing.T) {
+	cases := []struct {
+		name string
+		r    source.SearchResult
+		want string
+	}{
+		{"field wins", source.SearchResult{Language: "japanese"}, "japanese"},
+		{"field over decoration", source.SearchResult{Language: "japanese", EnglishTitle: "Foo [English]"}, "japanese"},
+		{"english decoration fallback", source.SearchResult{EnglishTitle: "Foo [English]"}, "english"},
+		{"japanese decoration fallback", source.SearchResult{JapaneseTitle: "Bar [Japanese]"}, "japanese"},
+		{"no signal", source.SearchResult{EnglishTitle: "Plain Title"}, ""},
+	}
+	for _, c := range cases {
+		if got := candLangResolver(c.r); got != c.want {
+			t.Errorf("%s: candLangResolver = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
@@ -58,7 +80,7 @@ func newTestApp(t *testing.T) *App {
 }
 
 func TestGalleryTypedTagsMapSubjectsNormalizeAndSort(t *testing.T) {
-	d := &nhentai.GalleryDetail{Tags: []nhentai.Tag{
+	d := &source.GalleryDetail{Tags: []tag.Typed{
 		{Type: "category", Name: "Doujinshi"},
 		{Type: "parody", Name: "Naruto"},
 		{Type: "tag", Name: "  Compilation "},
@@ -94,13 +116,13 @@ func TestApplyTagsUnionsExistingAndStampsGallery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	detail := &nhentai.GalleryDetail{ID: 999, Tags: []nhentai.Tag{
+	detail := &source.GalleryDetail{ID: "999", Tags: []tag.Typed{
 		{Type: "tag", Name: "shared"},    // overlaps an existing tag
 		{Type: "tag", Name: "new-one"},   // new
 		{Type: "parody", Name: "Naruto"}, // new, normalized to lowercase
 	}}
 
-	saved, err := a.applyTags(id, 999, []*nhentai.GalleryDetail{detail})
+	saved, err := a.applyTags(id, "nhentai", "999", []*source.GalleryDetail{detail})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +147,75 @@ func TestApplyTagsUnionsExistingAndStampsGallery(t *testing.T) {
 	}
 }
 
+// A gallery ref only means something to the site that issued it, so an apply must resolve
+// against the source the candidate came from — never whichever one happens to be active.
+// A review queue outlives a source switch, and two sites can use the same numeric id, so
+// getting this wrong fetches an unrelated gallery and stamps the wrong provenance.
+func TestProviderBySlugIgnoresTheActiveSource(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.SetActiveSource("nhentai"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetSourceConfig("nhentai", "secret", "", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit slug wins over the active source, even for a source that was never
+	// configured (mangadex and hitomi need no key, so their presets suffice).
+	for _, slug := range []string{"mangadex", "hitomi", "nhentai"} {
+		p, err := a.providerBySlug(slug)
+		if err != nil {
+			t.Fatalf("providerBySlug(%q): %v", slug, err)
+		}
+		if p.Slug() != slug {
+			t.Errorf("providerBySlug(%q) built %q", slug, p.Slug())
+		}
+	}
+	// Empty means "no provenance recorded" and falls back to the active source.
+	p, err := a.providerBySlug("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Slug() != "nhentai" {
+		t.Errorf("providerBySlug(\"\") = %q, want the active nhentai", p.Slug())
+	}
+	// An unknown slug must error rather than silently falling back — a silent fallback is
+	// exactly the mis-resolution this guards against.
+	if _, err := a.providerBySlug("bogus"); err == nil {
+		t.Error("providerBySlug(bogus) should error, not fall back to the active source")
+	}
+}
+
+// The provider-neutral link columns must be stamped for every source, and the legacy
+// nhentai_gallery_id must be left alone for the others — it is an int column that a
+// non-nhentai ref may not even parse into.
+func TestApplyTagsStampsNonNhentaiSourceLink(t *testing.T) {
+	a := newTestApp(t)
+	id, err := ingest.IngestManga(a.db, ingest.MangaInput{
+		Title: "Test Title", Author: "Test Author", FolderPath: "/tmp/t", PageCount: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := &source.GalleryDetail{ID: "4056725", Tags: []tag.Typed{{Type: "tag", Name: "loli"}}}
+	if _, err := a.applyTags(id, "hitomi", "4056725", []*source.GalleryDetail{detail}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := search.GetManga(a.db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.SourceSlug == nil || *m.SourceSlug != "hitomi" {
+		t.Errorf("source_slug = %v, want hitomi", m.SourceSlug)
+	}
+	if m.SourceRef == nil || *m.SourceRef != "4056725" {
+		t.Errorf("source_ref = %v, want 4056725", m.SourceRef)
+	}
+	if m.NhentaiGalleryID != nil {
+		t.Errorf("nhentai_gallery_id = %v, want unset for a non-nhentai source", *m.NhentaiGalleryID)
+	}
+}
+
 func TestApplyTagsPreservesExistingLanguage(t *testing.T) {
 	a := newTestApp(t)
 	// The title already has a language tag; a merge from a different-language gallery
@@ -136,11 +227,11 @@ func TestApplyTagsPreservesExistingLanguage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &nhentai.GalleryDetail{ID: 1, Tags: []nhentai.Tag{
+	d := &source.GalleryDetail{ID: "1", Tags: []tag.Typed{
 		{Type: "language", Name: "japanese"},
 		{Type: "tag", Name: "newtag"},
 	}}
-	saved, err := a.applyTags(id, 1, []*nhentai.GalleryDetail{d})
+	saved, err := a.applyTags(id, "nhentai", "1", []*source.GalleryDetail{d})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,13 +258,13 @@ func TestApplyTagsAdoptsOnlyPrimaryLanguageWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	primary := &nhentai.GalleryDetail{ID: 1, Tags: []nhentai.Tag{
+	primary := &source.GalleryDetail{ID: "1", Tags: []tag.Typed{
 		{Type: "language", Name: "english"}, {Type: "tag", Name: "aaa"},
 	}}
-	secondary := &nhentai.GalleryDetail{ID: 2, Tags: []nhentai.Tag{
+	secondary := &source.GalleryDetail{ID: "2", Tags: []tag.Typed{
 		{Type: "language", Name: "chinese"}, {Type: "tag", Name: "bbb"},
 	}}
-	saved, err := a.applyTags(id, 1, []*nhentai.GalleryDetail{primary, secondary})
+	saved, err := a.applyTags(id, "nhentai", "1", []*source.GalleryDetail{primary, secondary})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,9 +284,9 @@ func TestApplyTagsAdoptsOnlyPrimaryLanguageWhenEmpty(t *testing.T) {
 
 func TestToCandidatePopulatesCoverLangAndURL(t *testing.T) {
 	c := autotag.Candidate{
-		Gallery: nhentai.SearchResult{
-			ID: 42, MediaID: "777", Thumbnail: "https://t.nhentai.net/galleries/777/thumb.webp",
-			EnglishTitle: "X", NumPages: 20, NumFavorites: 3,
+		Gallery: source.SearchResult{
+			ID: "42", MediaID: "777", Thumbnail: "https://t.nhentai.net/galleries/777/thumb.webp",
+			GalleryURL: "https://nhentai.net/g/42/", EnglishTitle: "X", NumPages: 20, NumFavorites: 3,
 		},
 		TitleScore: 0.9, PagesExact: true, PageDelta: 0, Lang: "english", LangMatch: true,
 	}
@@ -214,15 +305,37 @@ func TestToCandidatePopulatesCoverLangAndURL(t *testing.T) {
 func TestShortlistFlagsArtistAndParodyOverlap(t *testing.T) {
 	mi := matchInputs("/lib/[Group (Sanada)] T (Kemono Jihen) [English]", "T", "")
 	ranked := []autotag.Candidate{
-		{Gallery: nhentai.SearchResult{ID: 1, EnglishTitle: "[Group (Sanada)] Whatever (Kemono Jihen) [English]"}},
-		{Gallery: nhentai.SearchResult{ID: 2, EnglishTitle: "[Other (Someone)] Whatever (Naruto)"}},
+		{Gallery: source.SearchResult{ID: "1", EnglishTitle: "[Group (Sanada)] Whatever (Kemono Jihen) [English]"}},
+		{Gallery: source.SearchResult{ID: "2", EnglishTitle: "[Other (Someone)] Whatever (Naruto)"}},
 	}
-	out := shortlist(ranked, 8, mi)
+	out := shortlist(ranked, 8, mi, "nhentai")
 	if !out[0].ArtistMatch || !out[0].ParodyMatch {
 		t.Errorf("candidate 0 should flag artist+parody overlap: %+v", out[0])
 	}
 	if out[1].ArtistMatch || out[1].ParodyMatch {
 		t.Errorf("candidate 1 should not overlap: %+v", out[1])
+	}
+	// Every candidate carries its own provenance — a pooled review shortlist mixes sources,
+	// and applying resolves the ref against the candidate's own provider.
+	for i, c := range out {
+		if c.SourceSlug != "nhentai" || c.SourceLabel != "nhentai" {
+			t.Errorf("candidate %d source = (%q,%q), want nhentai", i, c.SourceSlug, c.SourceLabel)
+		}
+	}
+}
+
+// wantQuery asserts one rung of the ladder by field. Since the refactor the ladder emits
+// neutral source.SearchQuery values rather than nhentai syntax, so these read the intent
+// directly (is the artist set? is this rung language-filtered?) instead of pattern-matching
+// a rendered string. The rendering itself is nhentai's business and is covered by
+// TestBuildQueryRendersNhentaiSyntax over in internal/nhentai.
+func wantQuery(t *testing.T, label string, got source.SearchQuery, artist, title, lang string) {
+	t.Helper()
+	if got.Artist != artist || got.Title != title || got.Language != lang {
+		t.Errorf("%s = %+v, want {Artist:%q Title:%q Language:%q}", label, got, artist, title, lang)
+	}
+	if got.Page != 1 {
+		t.Errorf("%s page = %d, want 1", label, got.Page)
 	}
 }
 
@@ -233,15 +346,9 @@ func TestSearchRequestsTitleFirstThenArtistNarrowed(t *testing.T) {
 	if len(reqs) < 3 {
 		t.Fatalf("want at least 3 requests, got %+v", reqs)
 	}
-	if reqs[0].query != "A Little Sister's Warmth" || reqs[0].page != 1 {
-		t.Errorf("first = %+v, want the free-text title", reqs[0])
-	}
-	if reqs[1].query != `artist:"some artist" title:"little"` {
-		t.Errorf("second = %+v, want the artist tag narrowed by the first distinctive title word", reqs[1])
-	}
-	if reqs[2].query != `artist:"some artist"` {
-		t.Errorf("third = %+v, want the bare artist catalog", reqs[2])
-	}
+	wantQuery(t, "first (free-text title)", reqs[0], "", "A Little Sister's Warmth", "")
+	wantQuery(t, "second (artist narrowed by first title word)", reqs[1], "some artist", "little", "")
+	wantQuery(t, "third (bare artist catalog)", reqs[2], "some artist", "", "")
 }
 
 // A concrete language narrows the title free-text query, but NOT the artist-tag queries —
@@ -252,22 +359,25 @@ func TestSearchRequestsAppendLanguageFilter(t *testing.T) {
 	if len(reqs) < 3 {
 		t.Fatalf("want title + 2 artist requests, got %+v", reqs)
 	}
-	if reqs[0].query != "Some Title language:english" {
-		t.Errorf("free-text = %q, want the language filter appended", reqs[0].query)
-	}
-	if reqs[1].query != `artist:"some artist" title:"some"` {
-		t.Errorf("artist-narrowed = %q, want NO language filter (tag is constraint enough)", reqs[1].query)
-	}
-	if reqs[2].query != `artist:"some artist"` {
-		t.Errorf("bare artist = %q, want NO language filter", reqs[2].query)
-	}
+	wantQuery(t, "free-text", reqs[0], "", "Some Title", "english")
+	wantQuery(t, "artist-narrowed (must NOT be language-filtered)", reqs[1], "some artist", "some", "")
+	wantQuery(t, "bare artist (must NOT be language-filtered)", reqs[2], "some artist", "", "")
 }
 
 // With no artist there's no tag to lean on — just the free-text title(s).
 func TestSearchRequestsWithoutArtistIsFreeTextOnly(t *testing.T) {
 	reqs := searchRequests("", []string{"Some Title"}, nil, "")
-	if len(reqs) != 1 || reqs[0].query != "Some Title" {
+	if len(reqs) != 1 {
 		t.Fatalf("want a single free-text title request, got %+v", reqs)
+	}
+	wantQuery(t, "only request", reqs[0], "", "Some Title", "")
+}
+
+// A language alone is a filter, not a search — a query with nothing to search for would
+// match the site's entire catalog, so it must never be emitted.
+func TestSearchRequestsSkipsEmptyQueries(t *testing.T) {
+	if reqs := searchRequests("", []string{"", "   "}, []string{"  "}, "english"); len(reqs) != 0 {
+		t.Errorf("blank title/anchors produced %+v, want no requests", reqs)
 	}
 }
 
@@ -278,18 +388,10 @@ func TestSearchRequestsArtistQueriesPrecedeExtraVariants(t *testing.T) {
 	if len(reqs) < 4 {
 		t.Fatalf("want at least 4 requests, got %+v", reqs)
 	}
-	if reqs[0].query != "Romaji Title" {
-		t.Errorf("reqs[0] = %q, want the primary variant", reqs[0].query)
-	}
-	if reqs[1].query != `artist:"some artist" title:"romaji"` {
-		t.Errorf("reqs[1] = %q, want the artist-narrowed query", reqs[1].query)
-	}
-	if reqs[2].query != `artist:"some artist"` {
-		t.Errorf("reqs[2] = %q, want the bare artist catalog within budget", reqs[2].query)
-	}
-	if reqs[3].query != "English Subtitle" {
-		t.Errorf("reqs[3] = %q, want the secondary variant after the artist queries", reqs[3].query)
-	}
+	wantQuery(t, "reqs[0] (primary variant)", reqs[0], "", "Romaji Title", "")
+	wantQuery(t, "reqs[1] (artist-narrowed)", reqs[1], "some artist", "romaji", "")
+	wantQuery(t, "reqs[2] (bare artist catalog within budget)", reqs[2], "some artist", "", "")
+	wantQuery(t, "reqs[3] (secondary variant after the artist queries)", reqs[3], "", "English Subtitle", "")
 }
 
 func TestFirstTitleWordSkipsShortWords(t *testing.T) {
@@ -304,12 +406,12 @@ func TestFirstTitleWordSkipsShortWords(t *testing.T) {
 // The early stop must not fire on a same-titled, same-page work by a different artist
 // when we know the local artist; the right-artist candidate must satisfy it.
 func TestConfidentMatchRequiresArtistWhenKnown(t *testing.T) {
-	score := func(r nhentai.SearchResult) []autotag.Candidate {
-		am := func(x nhentai.SearchResult) bool { return candidateArtistMatches(x, "some artist") }
-		return autotag.ScoreAll([]string{"A Little Sister's Warmth"}, 19, "", []nhentai.SearchResult{r}, nil, am)
+	score := func(r source.SearchResult) []autotag.Candidate {
+		am := func(x source.SearchResult) bool { return candidateArtistMatches(x, "some artist") }
+		return autotag.ScoreAll([]string{"A Little Sister's Warmth"}, 19, "", []source.SearchResult{r}, nil, am)
 	}
-	right := nhentai.SearchResult{ID: 1, EnglishTitle: "[Some Artist] A Little Sister's Warmth", NumPages: 19}
-	wrong := nhentai.SearchResult{ID: 2, EnglishTitle: "[Other Artist] A Little Sister's Warmth", NumPages: 19}
+	right := source.SearchResult{ID: "1", EnglishTitle: "[Some Artist] A Little Sister's Warmth", NumPages: 19}
+	wrong := source.SearchResult{ID: "2", EnglishTitle: "[Other Artist] A Little Sister's Warmth", NumPages: 19}
 	if confidentMatch(score(wrong), "some artist") {
 		t.Error("wrong-artist candidate should not be a confident match")
 	}
@@ -343,18 +445,36 @@ func TestMatchInputsCleansWrappedArtist(t *testing.T) {
 	}
 }
 
+func TestMatchInputsPeelsSourcePrefix(t *testing.T) {
+	// A "<slug>-<ref>" folder prefix is peeled into the (slug, ref) shortcut pair, for each
+	// registered provider's id shape (nhentai numeric, mangadex UUID); an ordinary folder
+	// leaves both empty so the shortcut never fires.
+	const uuid = "550e8400-e29b-41d4-a716-446655440000"
+	cases := []struct{ folder, wantSlug, wantRef string }{
+		{"/lib/nhentai-271687 - [A] Title", "nhentai", "271687"},
+		{"/lib/mangadex-" + uuid + " - Title", "mangadex", uuid},
+		{"/lib/[A] Ordinary Title", "", ""},
+	}
+	for _, c := range cases {
+		mi := matchInputs(c.folder, "Title", "")
+		if mi.sourceSlug != c.wantSlug || mi.sourceRef != c.wantRef {
+			t.Errorf("matchInputs(%q) source = (%q,%q), want (%q,%q)", c.folder, mi.sourceSlug, mi.sourceRef, c.wantSlug, c.wantRef)
+		}
+	}
+}
+
 func TestReviewPoolPrefersArtistMatches(t *testing.T) {
 	ranked := []autotag.Candidate{
-		{Gallery: nhentai.SearchResult{ID: 1}, ArtistMatch: false},
-		{Gallery: nhentai.SearchResult{ID: 2}, ArtistMatch: true},
-		{Gallery: nhentai.SearchResult{ID: 3}, ArtistMatch: true},
+		{Gallery: source.SearchResult{ID: "1"}, ArtistMatch: false},
+		{Gallery: source.SearchResult{ID: "2"}, ArtistMatch: true},
+		{Gallery: source.SearchResult{ID: "3"}, ArtistMatch: true},
 	}
-	if got := applyGalleryIDs(reviewPool(ranked)); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+	if got := applyGalleryIDs(reviewPool(ranked)); len(got) != 2 || got[0] != "2" || got[1] != "3" {
 		t.Errorf("pool = %v, want the artist-matched [2 3] in order", got)
 	}
 	// No artist matches -> fall back to the full ranked list.
-	none := []autotag.Candidate{{Gallery: nhentai.SearchResult{ID: 9}}}
-	if got := applyGalleryIDs(reviewPool(none)); len(got) != 1 || got[0] != 9 {
+	none := []autotag.Candidate{{Gallery: source.SearchResult{ID: "9"}}}
+	if got := applyGalleryIDs(reviewPool(none)); len(got) != 1 || got[0] != "9" {
 		t.Errorf("fallback pool = %v, want the full list [9]", got)
 	}
 }
@@ -368,7 +488,7 @@ func TestGatherCandidatesCleanArtistHitsCatalog(t *testing.T) {
 	if _, _, err := app.gatherCandidates(context.Background(), run, mi, 10, ""); err != nil {
 		t.Fatal(err)
 	}
-	if countQueries(cs.searchCalls, `artist:"rustle"`) == 0 {
+	if countQueries(cs.searchCalls, artistCatalogQuery("rustle", "").CacheKey()) == 0 {
 		t.Errorf(`expected an artist:"rustle" catalog query, got %v`, cs.searchCalls)
 	}
 	for _, c := range cs.searchCalls {
@@ -381,9 +501,10 @@ func TestGatherCandidatesCleanArtistHitsCatalog(t *testing.T) {
 // Forced-english prefers the language-narrowed catalog (keeping a prolific artist under the
 // page cap); when it has results the all-language catalog is never fetched.
 func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
-	cs := &stubSearcher{hits: map[string][]nhentai.SearchResult{
-		`artist:"x" language:english`: {{ID: 6, EnglishTitle: "[Circle] EN Work"}},
-		`artist:"x"`:                  {{ID: 7}}, // the all-language fallback — must stay unused
+	allLang := artistCatalogQuery("x", "").CacheKey()
+	cs := &stubSearcher{hits: map[string][]source.SearchResult{
+		artistCatalogQuery("x", "english").CacheKey(): {{ID: "6", EnglishTitle: "[Circle] EN Work"}},
+		allLang: {{ID: "7"}}, // the all-language fallback — must stay unused
 	}}
 	run := newAutoTagRun(cs, "english", map[string]int{"x": 2})
 	app := &App{}
@@ -393,11 +514,11 @@ func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range cs.calls {
-		if c == `artist:"x"` {
+		if c == allLang {
 			t.Errorf("all-language catalog fetched despite the narrowed one having results")
 		}
 	}
-	if len(cands) != 1 || cands[0].Gallery.ID != 6 {
+	if len(cands) != 1 || cands[0].Gallery.ID != "6" {
 		t.Errorf("want only the language-narrowed gallery 6, got %+v", cands)
 	}
 }
@@ -405,9 +526,9 @@ func TestGatherArtistCatalogPrefersLanguageNarrowed(t *testing.T) {
 // When the language-narrowed catalog is empty (a Japanese-only artist under forced-english),
 // it falls back to the all-language catalog and finds the works (flagged artist-matched).
 func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
-	cs := &stubSearcher{hits: map[string][]nhentai.SearchResult{
-		`artist:"x"`: {{ID: 5, EnglishTitle: "[Circle] JP-only Work"}},
-		// no `artist:"x" language:english` entry -> the narrowed query returns nothing
+	cs := &stubSearcher{hits: map[string][]source.SearchResult{
+		artistCatalogQuery("x", "").CacheKey(): {{ID: "5", EnglishTitle: "[Circle] JP-only Work"}},
+		// no english-narrowed entry -> that query returns nothing, forcing the fallback
 	}}
 	run := newAutoTagRun(cs, "english", map[string]int{"x": 2})
 	app := &App{}
@@ -418,7 +539,7 @@ func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
 	}
 	found := false
 	for _, c := range cands {
-		if c.Gallery.ID == 5 && c.ArtistMatch {
+		if c.Gallery.ID == "5" && c.ArtistMatch {
 			found = true
 		}
 	}
@@ -435,29 +556,32 @@ func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
 // and dedup paths are exercised.
 type countingSearcher struct {
 	searchCalls []string
-	detailCalls []int64
+	detailCalls []string
 	numPages    int
 	perPage     int
 }
 
-func (c *countingSearcher) Search(_ context.Context, query string, page int) (*nhentai.SearchResponse, error) {
-	c.searchCalls = append(c.searchCalls, fmt.Sprintf("%s#%d", query, page))
+func (c *countingSearcher) Slug() string { return "nhentai" }
+
+func (c *countingSearcher) Search(_ context.Context, query source.SearchQuery) (*source.SearchResponse, error) {
+	c.searchCalls = append(c.searchCalls, query.PageCacheKey())
+	page := query.Page
 	np := c.numPages
 	if np < 1 {
 		np = 1
 	}
-	var res []nhentai.SearchResult
+	var res []source.SearchResult
 	if page <= np {
 		for i := 0; i < c.perPage; i++ {
-			res = append(res, nhentai.SearchResult{ID: int64(page*1000 + i)})
+			res = append(res, source.SearchResult{ID: strconv.Itoa(page*1000 + i)})
 		}
 	}
-	return &nhentai.SearchResponse{Result: res, NumPages: np, PerPage: c.perPage, Total: np * c.perPage}, nil
+	return &source.SearchResponse{Result: res, NumPages: np, Total: np * c.perPage}, nil
 }
 
-func (c *countingSearcher) GalleryByID(_ context.Context, id int64) (*nhentai.GalleryDetail, error) {
+func (c *countingSearcher) GalleryByID(_ context.Context, id string) (*source.GalleryDetail, error) {
 	c.detailCalls = append(c.detailCalls, id)
-	return &nhentai.GalleryDetail{ID: id}, nil
+	return &source.GalleryDetail{ID: id}, nil
 }
 
 func countQueries(calls []string, prefix string) int {
@@ -475,7 +599,7 @@ func countQueries(calls []string, prefix string) int {
 func TestCatalogPagesThroughAndCaps(t *testing.T) {
 	cs := &countingSearcher{numPages: 12, perPage: 2}
 	run := newAutoTagRun(cs, "auto", nil)
-	results, truncated, err := run.catalog(context.Background(), `artist:"x"`)
+	results, truncated, err := run.catalog(context.Background(), artistCatalogQuery("x", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +613,7 @@ func TestCatalogPagesThroughAndCaps(t *testing.T) {
 		t.Errorf("got %d results, want %d", len(results), maxCatalogPages*cs.perPage)
 	}
 	before := len(cs.searchCalls)
-	if _, _, err := run.catalog(context.Background(), `artist:"x"`); err != nil {
+	if _, _, err := run.catalog(context.Background(), artistCatalogQuery("x", "")); err != nil {
 		t.Fatal(err)
 	}
 	if len(cs.searchCalls) != before {
@@ -502,7 +626,7 @@ func TestCatalogPagesThroughAndCaps(t *testing.T) {
 func TestCatalogStopsAtNumPages(t *testing.T) {
 	cs := &countingSearcher{numPages: 2, perPage: 3}
 	run := newAutoTagRun(cs, "auto", nil)
-	results, truncated, err := run.catalog(context.Background(), `artist:"x"`)
+	results, truncated, err := run.catalog(context.Background(), artistCatalogQuery("x", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +647,7 @@ func TestSearchPageAndDetailCached(t *testing.T) {
 	run := newAutoTagRun(cs, "auto", nil)
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
-		if _, err := run.searchPage(ctx, "q", 1); err != nil {
+		if _, err := run.searchPage(ctx, source.SearchQuery{Title: "q", Page: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -531,7 +655,7 @@ func TestSearchPageAndDetailCached(t *testing.T) {
 		t.Errorf("searchPage made %d calls for the same query+page, want 1 (cached)", len(cs.searchCalls))
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := run.detail(ctx, 42); err != nil {
+		if _, err := run.detail(ctx, "42"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -554,7 +678,7 @@ func TestGatherCatalogFirstSharedAcrossSiblings(t *testing.T) {
 	if _, _, err := app.gatherCandidates(context.Background(), run, mi2, 10, ""); err != nil {
 		t.Fatal(err)
 	}
-	if got := countQueries(cs.searchCalls, `artist:"x"#`); got != 2 {
+	if got := countQueries(cs.searchCalls, artistCatalogQuery("x", "").CacheKey()+"#"); got != 2 {
 		t.Errorf("artist catalog fetched %d pages across 2 siblings, want 2 (one page-through, cached)", got)
 	}
 }
@@ -574,7 +698,7 @@ func TestGatherSingletonStaysTitleFirst(t *testing.T) {
 			t.Errorf("singleton artist should not page the catalog; saw %q", c)
 		}
 	}
-	if got := countQueries(cs.searchCalls, "Solo Title#"); got != 1 {
+	if got := countQueries(cs.searchCalls, source.SearchQuery{Title: "Solo Title"}.CacheKey()+"#"); got != 1 {
 		t.Errorf("want the title free-text searched once, calls=%v", cs.searchCalls)
 	}
 }
@@ -606,18 +730,24 @@ func TestGatherSingletonFlagsArtistQueryResults(t *testing.T) {
 // records every query, so a test can model "this exact tag/language returns nothing, that
 // one returns the works" and assert which queries ran.
 type stubSearcher struct {
-	hits  map[string][]nhentai.SearchResult
+	hits  map[string][]source.SearchResult
 	calls []string
 }
 
-func (s *stubSearcher) Search(_ context.Context, query string, _ int) (*nhentai.SearchResponse, error) {
-	s.calls = append(s.calls, query)
-	res := s.hits[query]
-	return &nhentai.SearchResponse{Result: res, NumPages: 1, PerPage: len(res)}, nil
+func (s *stubSearcher) Slug() string { return "nhentai" }
+
+// Search keys hits by the query's canonical CacheKey. Note an unknown key returns nil,
+// which gatherCandidates reads as "this catalog is empty" — that is precisely the signal
+// the catalog-fallback tests below rely on, so their map keys are built through
+// SearchQuery.CacheKey() rather than hand-written strings that could silently drift.
+func (s *stubSearcher) Search(_ context.Context, query source.SearchQuery) (*source.SearchResponse, error) {
+	k := query.CacheKey()
+	s.calls = append(s.calls, k)
+	return &source.SearchResponse{Result: s.hits[k], NumPages: 1}, nil
 }
 
-func (s *stubSearcher) GalleryByID(_ context.Context, id int64) (*nhentai.GalleryDetail, error) {
-	return &nhentai.GalleryDetail{ID: id}, nil
+func (s *stubSearcher) GalleryByID(_ context.Context, id string) (*source.GalleryDetail, error) {
+	return &source.GalleryDetail{ID: id}, nil
 }
 
 func TestArtistTagVariants(t *testing.T) {
@@ -634,8 +764,8 @@ func TestArtistTagVariants(t *testing.T) {
 // A punctuated artist whose exact tag ("50% off") has no nhentai match falls back to the
 // word form ("50 percent off"), and those results are flagged artist-matched.
 func TestGatherCatalogNormalizedArtistFallback(t *testing.T) {
-	cs := &stubSearcher{hits: map[string][]nhentai.SearchResult{
-		`artist:"50 percent off"`: {{ID: 7, EnglishTitle: "[50% OFF] Best Friend"}},
+	cs := &stubSearcher{hits: map[string][]source.SearchResult{
+		artistCatalogQuery("50 percent off", "").CacheKey(): {{ID: "7", EnglishTitle: "[50% OFF] Best Friend"}},
 	}}
 	run := newAutoTagRun(cs, "auto", map[string]int{"50% off": 2})
 	app := &App{}
@@ -646,7 +776,7 @@ func TestGatherCatalogNormalizedArtistFallback(t *testing.T) {
 	}
 	found := false
 	for _, c := range cands {
-		if c.Gallery.ID == 7 && c.ArtistMatch {
+		if c.Gallery.ID == "7" && c.ArtistMatch {
 			found = true
 		}
 	}
@@ -673,18 +803,44 @@ func TestCatalogLanguageResolution(t *testing.T) {
 	}
 }
 
-func TestWithLangAndArtistCatalogQuery(t *testing.T) {
-	if got := withLang("foo", ""); got != "foo" {
-		t.Errorf(`withLang("foo","") = %q, want "foo"`, got)
+// artistCatalogQuery constrains by artist and nothing else, optionally language-narrowed.
+// It asserts fields, not a rendered string: how an artist constraint reaches the wire is
+// each provider's business (nhentai renders artist:"…", MangaDex resolves a UUID), and
+// nhentai's own rendering is covered by TestBuildQueryRendersNhentaiSyntax.
+func TestArtistCatalogQuery(t *testing.T) {
+	got := artistCatalogQuery("kinomoto anzu", "english")
+	if got.Artist != "kinomoto anzu" || got.Language != "english" || got.Title != "" {
+		t.Errorf("artistCatalogQuery = %+v, want artist+language only", got)
 	}
-	if got := withLang("foo", "english"); got != "foo language:english" {
-		t.Errorf("withLang concrete = %q", got)
+	if got := artistCatalogQuery("kinomoto anzu", ""); got.Language != "" || got.Artist != "kinomoto anzu" {
+		t.Errorf("artistCatalogQuery no-lang = %+v", got)
 	}
-	if got := artistCatalogQuery("kinomoto anzu", "english"); got != `artist:"kinomoto anzu" language:english` {
-		t.Errorf("artistCatalogQuery = %q", got)
+	// A catalog query has an artist, so it is never Empty even with no title.
+	if artistCatalogQuery("kinomoto anzu", "").Empty() {
+		t.Error("an artist-only catalog query must not count as empty")
 	}
-	if got := artistCatalogQuery("kinomoto anzu", ""); got != `artist:"kinomoto anzu"` {
-		t.Errorf("artistCatalogQuery no-lang = %q", got)
+}
+
+// The cache keys carry two invariants that would fail silently if broken. Case-insensitivity
+// keeps two spellings of one title from costing two searches (and two slots of the per-title
+// query budget). The unconditional "#<page>" suffix keeps a single-page fetch from ever
+// colliding with the page-less key a *complete* catalog page-through is stored under —
+// which would serve 25 results back as a whole artist catalog, with no truncation warning.
+func TestSearchQueryCacheKeys(t *testing.T) {
+	lower := source.SearchQuery{Artist: "Kinomoto Anzu", Title: "Best"}
+	upper := source.SearchQuery{Artist: "kinomoto anzu", Title: "best"}
+	if lower.CacheKey() != upper.CacheKey() {
+		t.Errorf("CacheKey is case-sensitive: %q vs %q", lower.CacheKey(), upper.CacheKey())
+	}
+	q := source.SearchQuery{Artist: "x"}
+	if q.PageCacheKey() == q.CacheKey() {
+		t.Errorf("page key %q collides with the catalog key %q", q.PageCacheKey(), q.CacheKey())
+	}
+	if page0 := (source.SearchQuery{Artist: "x", Page: 0}); page0.PageCacheKey() == page0.CacheKey() {
+		t.Errorf("a zero page must still be suffixed, got %q", page0.PageCacheKey())
+	}
+	if !(source.SearchQuery{Language: "english"}).Empty() {
+		t.Error("a language-only query must report Empty — it is a filter, not a search")
 	}
 }
 

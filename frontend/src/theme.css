@@ -748,6 +748,9 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 .nh-settings .nh-key-input:focus { border-color: var(--vermilion); box-shadow: 0 0 0 3px var(--vermilion-soft); outline: none; }
 .nh-key-state { color: var(--paper-mute); }
 .nh-key-state.ok { color: var(--vermilion); }
+/* Capability note for an id-only source (no free-text search) — an aside, not a state. */
+.nh-key-state.note { font-size: .85em; opacity: .8; }
+.nh-key-state.note code { font-family: inherit; opacity: .95; }
 .nh-autotag-link { color: var(--paper-2); text-decoration: none; border-bottom: 1px solid var(--rule-strong); }
 .nh-autotag-link:hover { color: var(--vermilion); border-bottom-color: var(--vermilion); }
 
@@ -769,6 +772,8 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 .nh-jp { color: var(--paper-2); font-size: var(--step--1); }
 .nh-meta { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); }
 .nh-pages.ok { color: var(--vermilion); }
+/* "page count n/a" — an absent signal, not a weak one; shouldn't read as a real 0. */
+.nh-pages.muted { opacity: .7; font-style: italic; }
 .nh-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
 .nh-tag { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-2); }
 .nh-more { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); font-style: italic; }
@@ -786,6 +791,14 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 /* Auto-decision header with the one-click merge-apply */
 .nh-auto { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); margin-bottom: var(--s-3); }
 .nh-auto .nh-picker-head { margin: 0; }
+/* Which source a match came from — matters once one queue can span sites. */
+.nh-src { color: var(--paper); font-weight: 600; }
+/* Per-candidate source, shown only when a shortlist actually mixes sites. */
+.nh-src-chip {
+    display: inline-block; padding: 0 .4em; margin-right: .15em;
+    border: 1px solid var(--rule); border-radius: 2px;
+    font-size: .85em; color: var(--paper); opacity: .9;
+}
 
 /* Covers: local (in the card) + remote nhentai candidate thumbnails */
 .nh-cover { width: 56px; aspect-ratio: 45 / 64; object-fit: cover; border-radius: var(--r-1); background: var(--ink-2); display: block; }

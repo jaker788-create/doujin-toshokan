@@ -1,10 +1,34 @@
 export namespace config {
 	
+	export class SourceConfig {
+	    provider: string;
+	    api_key: string;
+	    user_agent: string;
+	    base_url?: string;
+	    secrets?: Record<string, string>;
+	    enabled: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SourceConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.provider = source["provider"];
+	        this.api_key = source["api_key"];
+	        this.user_agent = source["user_agent"];
+	        this.base_url = source["base_url"];
+	        this.secrets = source["secrets"];
+	        this.enabled = source["enabled"];
+	    }
+	}
 	export class Config {
 	    library_roots: string[];
 	    port: number;
 	    nhentai_api_key: string;
 	    nhentai_user_agent: string;
+	    sources: SourceConfig[];
+	    active_source: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -16,7 +40,27 @@ export namespace config {
 	        this.port = source["port"];
 	        this.nhentai_api_key = source["nhentai_api_key"];
 	        this.nhentai_user_agent = source["nhentai_user_agent"];
+	        this.sources = this.convertValues(source["sources"], SourceConfig);
+	        this.active_source = source["active_source"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -26,6 +70,7 @@ export namespace main {
 	export class AutoTagOptions {
 	    resync: boolean;
 	    language_mode: string;
+	    fallback: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new AutoTagOptions(source);
@@ -35,6 +80,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.resync = source["resync"];
 	        this.language_mode = source["language_mode"];
+	        this.fallback = source["fallback"];
 	    }
 	}
 	export class MangaDetail {
@@ -73,8 +119,10 @@ export namespace main {
 		    return a;
 		}
 	}
-	export class NhentaiCandidate {
-	    gallery_id: number;
+	export class SourceCandidate {
+	    source_slug: string;
+	    source_label: string;
+	    gallery_id: string;
 	    media_id: string;
 	    thumbnail: string;
 	    gallery_url: string;
@@ -94,11 +142,13 @@ export namespace main {
 	    tags: tag.Typed[];
 	
 	    static createFrom(source: any = {}) {
-	        return new NhentaiCandidate(source);
+	        return new SourceCandidate(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source_slug = source["source_slug"];
+	        this.source_label = source["source_label"];
 	        this.gallery_id = source["gallery_id"];
 	        this.media_id = source["media_id"];
 	        this.thumbnail = source["thumbnail"];
@@ -147,8 +197,10 @@ export namespace main {
 	    folder_path: string;
 	    cover_rel_path?: string;
 	    decision: string;
-	    merge_gallery_ids: number[];
-	    candidates: NhentaiCandidate[];
+	    source_slug: string;
+	    source_label: string;
+	    merge_gallery_ids: string[];
+	    candidates: SourceCandidate[];
 	
 	    static createFrom(source: any = {}) {
 	        return new MatchResult(source);
@@ -165,8 +217,10 @@ export namespace main {
 	        this.folder_path = source["folder_path"];
 	        this.cover_rel_path = source["cover_rel_path"];
 	        this.decision = source["decision"];
+	        this.source_slug = source["source_slug"];
+	        this.source_label = source["source_label"];
 	        this.merge_gallery_ids = source["merge_gallery_ids"];
-	        this.candidates = this.convertValues(source["candidates"], NhentaiCandidate);
+	        this.candidates = this.convertValues(source["candidates"], SourceCandidate);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -187,7 +241,6 @@ export namespace main {
 		    return a;
 		}
 	}
-	
 	export class SearchArgs {
 	    q: string;
 	    author_id: number;
@@ -215,6 +268,9 @@ export namespace main {
 	export class Settings {
 	    has_nhentai_key: boolean;
 	    nhentai_user_agent: string;
+	    active_source: string;
+	    active_source_label: string;
+	    active_source_ready: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -224,6 +280,38 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.has_nhentai_key = source["has_nhentai_key"];
 	        this.nhentai_user_agent = source["nhentai_user_agent"];
+	        this.active_source = source["active_source"];
+	        this.active_source_label = source["active_source_label"];
+	        this.active_source_ready = source["active_source_ready"];
+	    }
+	}
+	
+	export class SourceState {
+	    slug: string;
+	    label: string;
+	    needs_key: boolean;
+	    id_only: boolean;
+	    ref_hint: string;
+	    has_key: boolean;
+	    enabled: boolean;
+	    active: boolean;
+	    user_agent: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SourceState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.slug = source["slug"];
+	        this.label = source["label"];
+	        this.needs_key = source["needs_key"];
+	        this.id_only = source["id_only"];
+	        this.ref_hint = source["ref_hint"];
+	        this.has_key = source["has_key"];
+	        this.enabled = source["enabled"];
+	        this.active = source["active"];
+	        this.user_agent = source["user_agent"];
 	    }
 	}
 	export class StashInput {
@@ -338,6 +426,8 @@ export namespace search {
 	    missing: boolean;
 	    nhentai_gallery_id?: number;
 	    display_title?: string;
+	    source_slug?: string;
+	    source_ref?: string;
 	    author_name: string;
 	
 	    static createFrom(source: any = {}) {
@@ -357,6 +447,8 @@ export namespace search {
 	        this.missing = source["missing"];
 	        this.nhentai_gallery_id = source["nhentai_gallery_id"];
 	        this.display_title = source["display_title"];
+	        this.source_slug = source["source_slug"];
+	        this.source_ref = source["source_ref"];
 	        this.author_name = source["author_name"];
 	    }
 	}

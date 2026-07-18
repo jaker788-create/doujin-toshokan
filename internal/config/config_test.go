@@ -45,3 +45,42 @@ func TestPathHelpers(t *testing.T) {
 		t.Errorf("ThumbCacheDir = %q, want %q", got, want)
 	}
 }
+
+// A legacy config (only the flat nhentai_* fields) must resolve to a single enabled
+// nhentai source and select it as active — so an existing install keeps auto-tagging with
+// no config rewrite.
+func TestResolveSourcesLegacySynth(t *testing.T) {
+	cfg := Config{NhentaiAPIKey: "secret", NhentaiUserAgent: "UA/1.0"}
+	srcs := cfg.ResolveSources()
+	if len(srcs) != 1 || srcs[0].Provider != "nhentai" || srcs[0].APIKey != "secret" || !srcs[0].Enabled {
+		t.Fatalf("legacy synth = %+v, want one enabled nhentai source", srcs)
+	}
+	active, ok := cfg.ActiveSourceConfig()
+	if !ok || active.Provider != "nhentai" {
+		t.Errorf("active = %+v (ok=%v), want nhentai", active, ok)
+	}
+
+	// No key at all -> no sources, no active.
+	if _, ok := (Config{}).ActiveSourceConfig(); ok {
+		t.Error("empty config should have no active source")
+	}
+}
+
+// An explicit Sources list wins over the legacy fields, and ActiveSource selects by slug.
+func TestActiveSourceConfigPrefersExplicit(t *testing.T) {
+	cfg := Config{
+		NhentaiAPIKey: "legacy", // must be ignored once Sources is set
+		Sources: []SourceConfig{
+			{Provider: "nhentai", APIKey: "k", Enabled: true},
+			{Provider: "mangadex", Enabled: true},
+		},
+		ActiveSource: "mangadex",
+	}
+	if srcs := cfg.ResolveSources(); len(srcs) != 2 {
+		t.Fatalf("explicit Sources should win, got %+v", srcs)
+	}
+	active, ok := cfg.ActiveSourceConfig()
+	if !ok || active.Provider != "mangadex" {
+		t.Errorf("active = %+v, want mangadex (by ActiveSource slug)", active)
+	}
+}

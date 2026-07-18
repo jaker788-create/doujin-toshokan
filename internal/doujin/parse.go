@@ -11,8 +11,8 @@
 package doujin
 
 import (
+	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -27,7 +27,8 @@ type Parsed struct {
 	Language     string   // from a […] language tag, e.g. "english"
 	MiscTags     []string // known […] tags, e.g. "digital", "decensored"
 	Translator   string   // {…} credit — discarded from tags
-	GalleryID    int64    // nhentai gallery id from a leading "nhentai-<id>" prefix; 0 if none
+	SourceSlug   string   // provider slug from a leading "<slug>-<ref>" prefix ("nhentai"); "" if none
+	SourceRef    string   // provider's own gallery ref from that prefix (nhentai's id, mangadex's UUID); "" if none
 }
 
 // languages recognized in a […] group and treated as the Language tag.
@@ -118,52 +119,101 @@ func tokenize(s string) []segment {
 	return segs
 }
 
-// sourcePrefix peels a leading source/id decoration that rippers prepend to the
-// conventional name, e.g. "nhentai-271687 - [Circle] Title …". It returns the parsed
-// gallery id and the remaining name; (0, name unchanged) when the pattern is absent.
+// sourceDef declares one provider's folder-prefix. leadingRef returns the ref token at
+// the start of the post-separator remainder, or "" if it is not that provider's id shape.
+// The slug MUST equal the provider package's Slug const (nhentai.Slug, mangadex.Slug) — a
+// leaf package can't import them, but those slugs are frozen (they are persisted in
+// manga.source_slug). To support a new source's folder-id shortcut, add a row here.
+type sourceDef struct {
+	slug       string
+	leadingRef func(string) string
+}
+
+var sourceDefs = []sourceDef{
+	{"nhentai", leadingDigits},   // numeric gallery id
+	{"mangadex", leadingUUID},    // UUID
+	{"hitomi", leadingDigits},    // numeric gallery id (the trailing number in a gallery URL)
+	{"ehentai", leadingGidToken}, // "<gid>-<token>" pair — a slash is illegal in a filename
+}
+
+// leadingDigits returns the run of ASCII digits at the start of s (nhentai/hitomi ids).
+func leadingDigits(s string) string {
+	n := 0
+	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+		n++
+	}
+	return s[:n]
+}
+
+// uuidRe matches a canonical 8-4-4-4-12 hex UUID anchored at the start (mangadex ids).
+var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
+// leadingUUID returns a canonical UUID at the start of s, or "".
+func leadingUUID(s string) string { return uuidRe.FindString(s) }
+
+// gidTokenRe matches e-hentai's "<gid>-<token>" pair at the start of s, capturing just the
+// pair. E-Hentai identifies a gallery by a number plus a 10-hex-character token (the token
+// is a capability — the right gid with the wrong token is refused), and it is written with
+// a dash because the canonical "gid/token" form cannot appear in a filename. Requiring the
+// hex run to END at 10 is what stops a title that happens to open with hex text from being
+// swallowed into the ref.
+var gidTokenRe = regexp.MustCompile(`^([0-9]+-[0-9a-fA-F]{10})(?:[^0-9a-fA-F]|$)`)
+
+// leadingGidToken returns an e-hentai "<gid>-<token>" pair at the start of s, or "". The
+// pair is returned as written; the ehentai client canonicalizes it to "gid/token".
+func leadingGidToken(s string) string {
+	m := gidTokenRe.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// sourcePrefix peels a leading "<slug>-<ref>" decoration that rippers prepend to the
+// conventional name, e.g. "nhentai-271687 - [Circle] Title …" or
+// "mangadex-<uuid> - Title". It returns the recognized provider slug, its gallery ref,
+// and the remaining name; ("", "", name unchanged) when no known prefix is present.
 //
-// Stripping matters two ways: the id is noise in the displayed title, and — worse —
-// left in place it is text before the first […], which makes ParseName treat the
-// first bracket as NOT the circle and mis-read the id as the title. The id itself is
-// worth keeping, though: it points at the exact nhentai gallery, a far stronger
-// auto-tag signal than a fuzzy artist/title search (see nhentai.go). Only a leading
-// "nhentai-<digits>" token (case-insensitive, '-' or '_' joining the word, id, and
-// the name) is matched; an id appearing mid-name is left untouched.
-func sourcePrefix(name string) (int64, string) {
-	const word = "nhentai"
+// Stripping matters two ways: the ref is noise in the displayed title, and — worse —
+// left in place it is text before the first […], which makes ParseName treat the first
+// bracket as NOT the circle and mis-read the ref as the title. The (slug, ref) pair is
+// worth keeping, though: it points at the exact gallery, a far stronger auto-tag signal
+// than a fuzzy artist/title search (see nhentai.go). Only a leading "<slug>-<ref>" token
+// for a registered provider (case-insensitive slug, '-' or '_' joining the word, ref,
+// and the name) is matched; a ref appearing mid-name is left untouched.
+func sourcePrefix(name string) (slug, ref, remainder string) {
 	s := strings.TrimSpace(name)
-	if len(s) <= len(word) || !strings.EqualFold(s[:len(word)], word) {
-		return 0, name
-	}
-	i := len(word)
-	if s[i] != '-' && s[i] != '_' {
-		return 0, name
-	}
-	i++
-	digitsStart := i
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+	for _, def := range sourceDefs {
+		w := def.slug
+		if len(s) <= len(w) || !strings.EqualFold(s[:len(w)], w) {
+			continue
+		}
+		i := len(w)
+		if s[i] != '-' && s[i] != '_' {
+			continue
+		}
 		i++
+		r := def.leadingRef(s[i:])
+		if r == "" {
+			continue // "<slug>-" not followed by that provider's id shape: not this pattern
+		}
+		i += len(r)
+		// Drop the separator run (spaces / dashes / underscores) joining ref to the name.
+		for i < len(s) && (s[i] == ' ' || s[i] == '-' || s[i] == '_') {
+			i++
+		}
+		return def.slug, r, s[i:]
 	}
-	if i == digitsStart {
-		return 0, name // "nhentai-" not followed by an id: not this pattern
-	}
-	id, err := strconv.ParseInt(s[digitsStart:i], 10, 64)
-	if err != nil {
-		return 0, name // unparseable/overflowing id — leave the name intact
-	}
-	// Drop the separator run (spaces / dashes / underscores) joining id to the name.
-	for i < len(s) && (s[i] == ' ' || s[i] == '-' || s[i] == '_') {
-		i++
-	}
-	return id, s[i:]
+	return "", "", name
 }
 
 // ParseName decomposes a folder name into its parts.
 func ParseName(name string) Parsed {
-	id, rest := sourcePrefix(name)
+	slug, ref, rest := sourcePrefix(name)
 	segs := tokenize(rest)
 	var p Parsed
-	p.GalleryID = id
+	p.SourceSlug = slug
+	p.SourceRef = ref
 
 	firstSquare := -1
 	for i, s := range segs {

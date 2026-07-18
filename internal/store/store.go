@@ -82,6 +82,7 @@ var migrations = []func(*sql.Tx) error{
 	migrate004TagType,
 	migrate005CleanAuthorNames,
 	migrate006DisplayTitle,
+	migrate007SourceLink,
 }
 
 func migrate001Initial(tx *sql.Tx) error {
@@ -207,6 +208,62 @@ func migrate005CleanAuthorNames(tx *sql.Tx) error {
 func migrate006DisplayTitle(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE manga ADD COLUMN display_title TEXT;`)
 	return err
+}
+
+// migrate007SourceLink generalizes the single nhentai link into a provider-neutral
+// pair: source_slug names which metadata source a title's tags were copied from
+// ("nhentai", "mangadex", …) and source_ref is that source's own gallery id as a string
+// (nhentai's numeric id, mangadex's UUID, e-hentai's "gid/token"). Existing nhentai links
+// are backfilled from the legacy nhentai_gallery_id column, which is kept in place so old
+// data and the numeric-id UI paths still read. Both new columns are nullable — a title
+// that was never matched leaves them NULL, which is what the bulk sweep's "skip already
+// linked" filter (source_ref IS NULL) keys on. Guarded by a table_info existence check so
+// an interrupted run can re-apply safely.
+func migrate007SourceLink(tx *sql.Tx) error {
+	has, err := columnExists(tx, "manga", "source_slug")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := tx.Exec(`ALTER TABLE manga ADD COLUMN source_slug TEXT;`); err != nil {
+			return err
+		}
+	}
+	has, err = columnExists(tx, "manga", "source_ref")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := tx.Exec(`ALTER TABLE manga ADD COLUMN source_ref TEXT;`); err != nil {
+			return err
+		}
+	}
+	// Backfill existing nhentai links: slug 'nhentai', ref = the numeric gallery id as text.
+	_, err = tx.Exec(`UPDATE manga SET source_slug='nhentai', source_ref=CAST(nhentai_gallery_id AS TEXT)
+		WHERE nhentai_gallery_id IS NOT NULL AND source_ref IS NULL;`)
+	return err
+}
+
+// columnExists reports whether the named column is present on a table, via PRAGMA
+// table_info — so an ADD COLUMN migration can be guarded against re-application.
+func columnExists(tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // MigrationCount is the number of migrations in the ladder, i.e. the latest schema

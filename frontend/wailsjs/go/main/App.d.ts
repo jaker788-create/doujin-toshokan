@@ -9,9 +9,9 @@ import {stash} from '../models';
 
 export function AddLibraryRoot():Promise<string>;
 
-export function ApplyNhentaiMerge(arg1:number,arg2:Array<number>):Promise<Array<tag.Typed>>;
+export function ApplySourceMerge(arg1:number,arg2:string,arg3:Array<string>):Promise<Array<tag.Typed>>;
 
-export function ApplyNhentaiTags(arg1:number,arg2:number):Promise<Array<tag.Typed>>;
+export function ApplySourceTags(arg1:number,arg2:string,arg3:string):Promise<Array<tag.Typed>>;
 
 export function CancelAutoTag():Promise<void>;
 
@@ -29,13 +29,15 @@ export function GetManga(arg1:number):Promise<main.MangaDetail>;
 
 export function GetSettings():Promise<main.Settings>;
 
+export function GetSources():Promise<Array<main.SourceState>>;
+
 export function GetUnimported():Promise<Array<main.UnimportedPreview>>;
 
 export function ImportAll():Promise<void>;
 
 export function Ingest(arg1:scanner.DetectedFolder,arg2:Array<string>):Promise<void>;
 
-export function MatchNhentai(arg1:number):Promise<main.MatchResult>;
+export function MatchSource(arg1:number):Promise<main.MatchResult>;
 
 export function RemoveLibraryRoot(arg1:string):Promise<void>;
 
@@ -45,9 +47,13 @@ export function Rescan():Promise<void>;
 
 export function Search(arg1:main.SearchArgs):Promise<Array<search.Manga>>;
 
+export function SetActiveSource(arg1:string):Promise<void>;
+
 export function SetDisplayTitle(arg1:number,arg2:string):Promise<search.Manga>;
 
 export function SetNhentaiKey(arg1:string):Promise<void>;
+
+export function SetSourceConfig(arg1:string,arg2:string,arg3:string,arg4:boolean):Promise<void>;
 
 export function StartAutoTag(arg1:main.AutoTagOptions):Promise<void>;
 

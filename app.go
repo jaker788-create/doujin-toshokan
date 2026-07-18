@@ -12,6 +12,7 @@ import (
 
 	"doujin/internal/config"
 	"doujin/internal/doujin"
+	"doujin/internal/embedmeta"
 	"doujin/internal/ingest"
 	"doujin/internal/scanner"
 	"doujin/internal/search"
@@ -303,7 +304,13 @@ func mangaInputFromFolder(d scanner.DetectedFolder, extraTags []string) ingest.M
 		}
 	}
 
-	tags := append(parsedTypedTags(p), generalTags(extraTags)...)
+	// Tags come from three sources, later ones merging with (never replacing)
+	// earlier ones — ingest de-duplicates by name: the filename decorations, the
+	// full scraped set embedded in a .cbz's info.json (characters, general tags,
+	// every artist/group — the parts the filename can't carry), and any freeform
+	// tags the user supplied on the Scan row.
+	tags := append(parsedTypedTags(p), embedmeta.TypedTagsFor(d.FolderPath)...)
+	tags = append(tags, generalTags(extraTags)...)
 	return ingest.MangaInput{
 		Title:        title,
 		Author:       author,
@@ -433,11 +440,14 @@ func (a *App) Rescan() error {
 			"UPDATE manga SET missing=0, page_count=?, title=? WHERE id=?", n, title, r.id); err != nil {
 			return err
 		}
-		// Additively apply the tags implied by the folder name, with their subjects.
-		// INSERT OR IGNORE keeps it idempotent and never disturbs existing
-		// (manual/nhentai) tags; GetOrCreateTag also backfills the subject onto any tag
-		// row that was still untyped, so Rescan upgrades a pre-subjects library in place.
-		for _, raw := range parsedTypedTags(p) {
+		// Additively apply the tags implied by the folder name plus any embedded in a
+		// .cbz's info.json, with their subjects. INSERT OR IGNORE keeps it idempotent
+		// and never disturbs existing (manual/nhentai) tags; GetOrCreateTag also
+		// backfills the subject onto any tag row that was still untyped, so Rescan
+		// upgrades a pre-subjects library — and backfills embedded tags onto titles
+		// imported before this metadata was read — in place.
+		embedTags := embedmeta.TypedTagsFor(r.path)
+		for _, raw := range append(parsedTypedTags(p), embedTags...) {
 			name := ingest.NormalizeTag(raw.Name)
 			if name == "" {
 				continue

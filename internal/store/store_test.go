@@ -149,9 +149,72 @@ func TestMigration004AddsTagTypeColumn(t *testing.T) {
 	}
 }
 
+// hasColumn reports whether a table has the named column (test helper).
+func hasColumn(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
+// migrate007 adds the provider-neutral source_slug/source_ref link columns and backfills
+// an existing nhentai_gallery_id into ('nhentai', "<id>"). Re-running it is a safe no-op on
+// already-linked rows (guarded by source_ref IS NULL), which this also exercises.
+func TestMigration007AddsSourceLinkAndBackfills(t *testing.T) {
+	db := openTest(t)
+	if err := Init(db); err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"source_slug", "source_ref"} {
+		if !hasColumn(t, db, "manga", col) {
+			t.Errorf("manga.%s missing after Init", col)
+		}
+	}
+
+	// A legacy nhentai link whose source_ref is still NULL must backfill on (idempotent) re-run.
+	if _, err := db.Exec(`INSERT INTO authors(id, name) VALUES (1, 'A')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO manga(id, title, author_id, folder_path, date_added, date_modified, nhentai_gallery_id)
+		VALUES (1, 'T', 1, '/x', '', '', 123)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate007SourceLink(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var slug, ref sql.NullString
+	if err := db.QueryRow("SELECT source_slug, source_ref FROM manga WHERE id = 1").Scan(&slug, &ref); err != nil {
+		t.Fatal(err)
+	}
+	if slug.String != "nhentai" || ref.String != "123" {
+		t.Errorf("backfill = (%q, %q), want (nhentai, 123)", slug.String, ref.String)
+	}
+}
+
 func TestMigrationLadderLength(t *testing.T) {
-	if MigrationCount() != 6 {
-		t.Errorf("MigrationCount() = %d, want 6", MigrationCount())
+	if MigrationCount() != 7 {
+		t.Errorf("MigrationCount() = %d, want 7", MigrationCount())
 	}
 }
 
