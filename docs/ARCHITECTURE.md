@@ -136,7 +136,16 @@ site's quirks (nhentai's int ids + search syntax, mangadex's UUIDs + relationshi
 authors) are mapped to the neutral model *inside* its client (`internal/nhentai`,
 `internal/mangadex`); the matcher (`internal/autotag`) and the apply path stay
 site-agnostic. *Why:* adding a source is implementing one interface, not editing the
-matcher. The `manga.source_slug` / `source_ref` link columns (migration 007) record
+matcher.
+
+Searching is structured for the same reason: callers pass a `source.SearchQuery`
+(`{Title, Artist, Language, Page}`) describing *what* they want, and each provider
+renders it into its own wire format — **never a site's query syntax**. nhentai's
+`artist:"x" title:"y" language:z` is built inside `internal/nhentai` and spoken
+nowhere else; MangaDex maps the same struct onto real API filters (resolving the
+artist to an author UUID). Before this seam existed the matcher emitted nhentai
+syntax and every other provider had to reverse-engineer it, which silently reduced
+MangaDex's artist searches to guaranteed zero-result queries. The `manga.source_slug` / `source_ref` link columns (migration 007) record
 which provider a title's tags came from as a `(slug, string-id)` pair — the provider-
 agnostic successor to the legacy `nhentai_gallery_id` they backfill from.
 
