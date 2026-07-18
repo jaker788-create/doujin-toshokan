@@ -11,10 +11,11 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > **Progress (feat/multi-source-tagging):** done — **1.3** (architecture docs), **3.2**
 > (MangaDex 429 retry/backoff), **2.3 + 3.3** (provider-supplied `SearchResult.Language` fed
 > into ranking), **2.1** (folder-id prefix registry: nhentai + mangadex peel; the
-> shortcut is gated on the active provider), and **3.1** (the query-struct refactor — the
-> string search contract is gone). **3.5 was attempted and reverted** — not the quick win it
-> looked like; see the item. Still open: the providers (**1.1** E-Hentai / **1.2** Hitomi —
-> now a one-line `sourceDefs` add each), multi-source strategy (**2.2**), and the rest of §3.
+> shortcut is gated on the active provider), **3.1** (the query-struct refactor — the
+> string search contract is gone), and **1.2** (the Hitomi provider — the first ID-only
+> source). **3.5 was attempted and reverted** — not the quick win it looked like; see the
+> item. Still open: **1.1** (E-Hentai, blocked on 2.4), multi-source strategy (**2.2**),
+> and the rest of §3.
 
 ---
 
@@ -52,39 +53,52 @@ tags that map ~1:1 onto our `tag` subjects — but it has **no JSON free-text se
 
 **Depends on:** decision 2.1 (prefix generalization) and 2.4 (cookie auth in the UI).
 
-### 1.2 Hitomi.la provider — **S/M**
-Scope: **ID + manual only**, same contract as E-Hentai (1.1). Hitomi has no official
-API, but a stable de-facto JSON endpoint every third-party client uses:
+### 1.2 Hitomi.la provider — ✅ DONE
+`internal/hitomi` implements `source.Provider` as the **first ID-only source**: `Search`
+returns an empty `SearchResponse` without touching the network, and the site is reached
+through the `hitomi-<id>` folder shortcut + manual apply. Metadata comes from the de-facto
+endpoint every third-party client uses:
 
 ```
 GET https://ltn.gold-usergeneratedcontent.net/galleries/{id}.js
 ```
 
-Returns `var galleryinfo = {...}` — strip the `var galleryinfo = ` prefix, parse the
-rest as JSON. Fields map ~1:1 onto our `tag` subjects: `tags[]` (with `male`/`female`
-attributes → plain tags), `artists[]`, `groups[]`, `parodys[]` (sic), `characters[]`,
-`language`, `type` (doujinshi/manga/cg/imageset), `title`/`japanese_title`, and
-`files[]` (→ page count for `autotag.qualifies`). The gallery id is the trailing
-number in every gallery URL (`...-中文-4056725.html`).
+which serves **JavaScript, not JSON** — `decodeGalleryInfo` strips the `var galleryinfo =`
+assignment (leniently: any spacing, optional trailing `;`) and rejects anything else, so
+hitomi's HTML 404 page can never decode into a blank success.
 
-- New `internal/hitomi/client.go` implementing `source.Provider`.
-  - `GalleryByID("<id>")` → the `.js` endpoint above; ids are numeric.
-  - `Search(...)` returns empty (best-effort contract, as with E-Hentai). Hitomi's
-    search is client-side over binary `.nozomi`/index files — reverse-engineering it
-    is **L** and not worth it; folder-id shortcut + manual apply cover the use case.
-- **No auth** — no token, no account system. Send a browser-ish `User-Agent` and
-  `Referer: https://hitomi.la/` (required by the image CDN; harmless on metadata).
-- Thumbnail: `files[].hash`-derived CDN URLs churn with the site's URL-shuffling
-  scripts — acceptable to ship with **no thumbnail** first and add later if stable.
-- **Churn risk:** the data domain already moved once (`ltn.hitomi.la` →
-  `ltn.gold-usergeneratedcontent.net`, 2025-03) and hitomi shuffles endpoints
-  periodically. Keep the base URL in `SourceConfig` (overridable) rather than a
-  constant, so a domain move is a settings edit, not a release.
-- Folder-id prefix: `hitomi-<id>` via the prefix registry (decision 2.1).
+Mapping is close to 1:1 — `artists`/`groups`/`parodys` (sic)/`characters`/`language` land
+on the matching subjects, `files[]` gives the page count, and `type`
+(doujinshi/manga/cg/imageset/anime) becomes a **Category**, mirroring nhentai's own
+"doujinshi" category tag. Hitomi's gender namespace on tags (`female:loli`) is **flattened
+to the bare name**, because the local library's tags come from sites that do not namespace.
 
-**Depends on:** decision 2.1 (prefix generalization). Simpler than E-Hentai — no
-cookies/secrets needed, so it can land before 1.1 and exercise the ID-only provider
-shape first.
+**Three things the live site does that a spec-reading implementation gets wrong** — all
+found by probing real galleries, none visible against a fake server:
+
+1. **`id` is a JSON number on old galleries and a string on new ones.** Both are live
+   today (5000 → `5000`, 4056725 → `"4056725"`). A single-typed field fails to decode half
+   the site; `flexID` handles both.
+2. **`tags[].male`/`female` are typed just as inconsistently** (`1` vs `"1"`, absent on
+   ungendered tags). We do not read them, so the fields are deliberately *absent* from the
+   DTO — declaring them as `string` broke every pre-2015 gallery until a live run caught it.
+3. **Some old ids are aliases.** `/galleries/900.js` serves the gallery whose own id is
+   4646. The client prefers the id the *document* reports, normalizing an alias to the
+   canonical gallery so the stamped `source_ref` is the durable one.
+
+Also landed:
+- **Configurable base URL** — `config.SourceConfig.BaseURL` (empty = the provider default).
+  This is not speculative: the old data domain `ltn.hitomi.la` **no longer resolves at all**
+  after the 2025-03 move, so the next move should be a settings edit, not a release.
+- **`providerPreset.IDOnly` → `SourceState.id_only` → a note in the Settings picker.** An
+  id-only source makes a bulk sweep report "no match" on every title without an id in its
+  folder name; unlabelled, that reads as a broken app rather than the documented contract.
+- Folder-id prefix: one `sourceDefs` row reusing `leadingDigits`, as predicted by 2.1.
+
+**Not done (deliberate):** no thumbnail. Cover URLs are derived from `files[].hash` through
+the site's own URL-shuffling script (`gg.js`), which churns independently of this endpoint —
+shipping no thumbnail beats shipping a broken one. Search stays unimplemented: hitomi's is
+client-side over binary `.nozomi` index files, which is **L** and not worth it.
 
 ### 1.3 Architecture docs — **S**
 `docs/ARCHITECTURE.md` still describes the nhentai-only design. Update:
@@ -102,13 +116,13 @@ shape first.
 `doujin.sourcePrefix` is now a per-provider registry (`sourceDefs` in `internal/doujin/parse.go`):
 each entry is a `{slug, leadingRef func(string) string}` matcher; `Parsed.GalleryID int64`
 became `SourceSlug`/`SourceRef string`, and `matchInput.galleryID` is now a `(sourceSlug,
-sourceRef)` pair. Registered: **nhentai** (`leadingDigits`) and **mangadex** (`leadingUUID`,
-canonical 8-4-4-4-12). The `MatchSource`/`runAutoTag` shortcut fires only when
+sourceRef)` pair. Registered: **nhentai** (`leadingDigits`), **mangadex** (`leadingUUID`,
+canonical 8-4-4-4-12) and **hitomi** (`leadingDigits`). The `MatchSource`/`runAutoTag` shortcut fires only when
 `mi.sourceSlug == run.slug` (the active provider), so a mismatched folder falls through to
 fuzzy instead of a doomed cross-provider `GalleryByID`.
-- **Adding a source's shortcut** is a one-line `sourceDefs` row: **hitomi** reuses
-  `leadingDigits`; **ehentai** (`ehentai-<gid>-<token>`) needs a new `gid-token` matcher (read
-  `<digits>-<alnum>` → normalize to `gid/token`).
+- **Adding a source's shortcut** is a one-line `sourceDefs` row — hitomi (1.2) landed as
+  exactly that. **ehentai** (`ehentai-<gid>-<token>`) still needs a new `gid-token` matcher
+  (read `<digits>-<alnum>` → normalize to `gid/token`).
 - Left for **2.2**: a folder whose slug ≠ the active source is *not* routed to its own
   provider (we only query the active one) — it falls to fuzzy. That cross-provider routing is
   the multi-source strategy question below.
@@ -216,15 +230,21 @@ more than one source is in play.
 docs update (1.3) ────────────► ✅ done
 query-struct refactor (3.1) ──► ✅ done — providers now own their wire format
 prefix registry (2.1) ────────► ✅ done
-Hitomi provider (1.2) ────────► NEXT: needs 2.1 only (no auth) — first ID-only provider
-E-Hentai provider (1.1) ──────► needs 2.4 (cookie auth in the UI); reuses 1.2's shape
+Hitomi provider (1.2) ────────► ✅ done — first ID-only provider; id_only surfaced in the UI
+E-Hentai provider (1.1) ──────► NEXT: needs 2.4 (cookie auth in the UI); reuses 1.2's shape
 multi-source fallback (2.2) ──► after ≥2 useful providers exist
 ```
 
-**Next up: 1.2 (Hitomi).** With 3.1 landed, an ID-only provider is now trivial to express —
-`Search` returns an empty `SearchResponse` and the structured query is simply ignored, with
-no query-string parsing to fake. Hitomi needs no auth, so it exercises the ID-only shape
-before E-Hentai adds cookies on top.
+**Next up: 1.1 (E-Hentai) — but decide 2.4 first.** 1.2 proved the ID-only shape end to
+end, so E-Hentai is mostly the same client with a different DTO; what is genuinely new is
+cookie auth in the Settings UI (2.4), and that is a decision, not a mechanical port. The
+`IDOnly` flag 1.2 added applies to E-Hentai unchanged.
+
+**2.2 is now the more valuable slice, though.** Two of three providers are id-only, so a
+mixed library can only ever tag against whichever single source is active — a hitomi-ripped
+folder sitting in a library swept under nhentai falls to fuzzy matching even though its id
+is right there in the name (see the note under 2.1). Ordered fallback (Option B) would fix
+that for the providers already shipped, without adding a fourth.
 
 Remaining Small items, all independent: **3.4** (rename `nhSearcher` → `providerSearcher`,
 `nhentai.go` → `tagging.go` — note `internal/mangadex/client.go`'s package doc already

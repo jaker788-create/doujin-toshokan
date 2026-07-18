@@ -145,7 +145,17 @@ renders it into its own wire format — **never a site's query syntax**. nhentai
 nowhere else; MangaDex maps the same struct onto real API filters (resolving the
 artist to an author UUID). Before this seam existed the matcher emitted nhentai
 syntax and every other provider had to reverse-engineer it, which silently reduced
-MangaDex's artist searches to guaranteed zero-result queries. The `manga.source_slug` / `source_ref` link columns (migration 007) record
+MangaDex's artist searches to guaranteed zero-result queries.
+
+Search is explicitly **best-effort**: a provider with no free-text search at all returns
+an empty `SearchResponse` rather than an error, and stays fully useful through the
+`<slug>-<id>` folder shortcut and manual apply. `internal/hitomi` is the reference case
+(hitomi's own search is client-side over binary index files, so there is nothing to
+query). Such a provider sets `providerPreset.IDOnly`, which reaches the Settings picker
+as `SourceState.id_only` — a sweep that can only match id-bearing folders has to *say*
+so, or its "no match" results read as a bug rather than the contract.
+
+The `manga.source_slug` / `source_ref` link columns (migration 007) record
 which provider a title's tags came from as a `(slug, string-id)` pair — the provider-
 agnostic successor to the legacy `nhentai_gallery_id` they backfill from.
 
@@ -166,7 +176,7 @@ Backend packages under `internal/`. Each has one responsibility.
 | `tag` | Leaf vocabulary package: the canonical tag **subjects** (`language`, `artist`, `group`, `parody`, `character`, `category`, `tag`, plus `General`) — the same set nhentai uses — with `Typed{Name,Type}`, `Normalize`, `Label`, `Rank`, `Sort`. Shared by the parser-mapping, ingest, search, and provider layers with no import cycle. |
 | `autotag` | Pure, network-free matcher: scores a local title against a provider's neutral `SearchResult`s (cross-language title similarity, with page + language ranking) and decides auto-apply vs. review. Works identically for every provider. |
 | `source` | Leaf provider-neutral **seam**: the `Provider` interface + neutral `SearchResult`/`GalleryDetail`/`SearchResponse` the matcher scores. IDs are strings; search is best-effort (a detail-only site may return nothing). See invariant 10. |
-| `nhentai` / `mangadex` | The two `source.Provider` implementations — rate-limited HTTP clients that look up galleries and map each site's JSON + tags onto the neutral types and the shared `tag.Subject` vocabulary. Add a source by adding a package here. |
+| `nhentai` / `mangadex` / `hitomi` | The `source.Provider` implementations — rate-limited HTTP clients that look up galleries and map each site's JSON + tags onto the neutral types and the shared `tag.Subject` vocabulary. `hitomi` is id-only (empty `Search`) and parses a JS `var galleryinfo = {…}` document rather than JSON. Add a source by adding a package here. |
 | `paths` | `IsWithinRoots` path-traversal guard. |
 | `stash` | Saved pages ("tabs"): CRUD over the `stash` table. An entry is a `hash` + `label` + `kind` (`search`\|`title`); title entries `LEFT JOIN manga`/`authors` for card display and own a `last_page` resume position (`ON DELETE CASCADE` with `manga`). Uses the `store.Querier` style. |
 
