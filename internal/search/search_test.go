@@ -342,3 +342,107 @@ func TestSearchLimitOffset(t *testing.T) {
 		t.Errorf("unlimited = %d rows, want 2", len(all))
 	}
 }
+
+// setSource stamps a title's provenance the way the auto-tagger's applyTags does.
+func setSource(t *testing.T, db *sql.DB, id int64, slug, ref string) {
+	t.Helper()
+	if _, err := db.Exec("UPDATE manga SET source_slug=?, source_ref=? WHERE id=?", slug, ref, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSearchFiltersBySource(t *testing.T) {
+	db := newDB(t)
+	blue, _ := seed(t, db) // Blue Sky (Aoi), Forest (Mori)
+	setSource(t, db, blue, "hitomi", "5000")
+	// Forest stays NULL — never auto-tagged.
+
+	got, err := SearchManga(db, SearchParams{Sort: "title", SourceSlug: "hitomi"})
+	if err != nil {
+		t.Fatalf("SearchManga: %v", err)
+	}
+	if !eq(titles(got), []string{"Blue Sky"}) {
+		t.Errorf("source=hitomi = %v, want [Blue Sky]", titles(got))
+	}
+
+	got, _ = SearchManga(db, SearchParams{Sort: "title", SourceSlug: SourceNone})
+	if !eq(titles(got), []string{"Forest"}) {
+		t.Errorf("source=none = %v, want [Forest]", titles(got))
+	}
+
+	// An empty slug must not filter at all — it is the "any source" default, and a
+	// library view with no source filter has to keep showing untagged titles.
+	got, _ = SearchManga(db, SearchParams{Sort: "title"})
+	if len(got) != 2 {
+		t.Errorf("no source filter = %v, want both titles", titles(got))
+	}
+
+	got, _ = SearchManga(db, SearchParams{Sort: "title", SourceSlug: "mangadex"})
+	if len(got) != 0 {
+		t.Errorf("source=mangadex = %v, want []", titles(got))
+	}
+}
+
+// A blank source_slug must count and filter as untagged, not as its own source.
+// Migration 007 can leave an empty string rather than NULL on some rows, and splitting
+// the two spellings would hide those titles from every filter value at once.
+func TestSearchSourceBlankCountsAsUntagged(t *testing.T) {
+	db := newDB(t)
+	blue, forest := seed(t, db)
+	setSource(t, db, blue, "", "")
+	setSource(t, db, forest, "nhentai", "177013")
+
+	got, err := SearchManga(db, SearchParams{Sort: "title", SourceSlug: SourceNone})
+	if err != nil {
+		t.Fatalf("SearchManga: %v", err)
+	}
+	if !eq(titles(got), []string{"Blue Sky"}) {
+		t.Errorf("source=none = %v, want [Blue Sky] (blank slug is untagged)", titles(got))
+	}
+
+	counts, err := SourceCounts(db)
+	if err != nil {
+		t.Fatalf("SourceCounts: %v", err)
+	}
+	for _, c := range counts {
+		if c.Slug == "" {
+			t.Fatalf("SourceCounts returned a blank slug bucket: %+v", counts)
+		}
+	}
+}
+
+// The facet list is ordered: real sources by descending count, untagged always last.
+func TestSourceCountsOrderAndBuckets(t *testing.T) {
+	db := newDB(t)
+	blue, _ := seed(t, db)
+	setSource(t, db, blue, "nhentai", "1")
+	// Forest stays untagged; add two more nhentai and one hitomi so counts differ.
+	for i, slug := range []string{"nhentai", "nhentai", "hitomi"} {
+		id, err := ingest.IngestManga(db, ingest.MangaInput{
+			Title: "T" + string(rune('a'+i)), Author: "A", FolderPath: "/x" + string(rune('a'+i)),
+			PageCount: 1, Tags: gen("t"),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		setSource(t, db, id, slug, "r")
+	}
+
+	counts, err := SourceCounts(db)
+	if err != nil {
+		t.Fatalf("SourceCounts: %v", err)
+	}
+	want := []SourceCount{
+		{Slug: "nhentai", Count: 3},
+		{Slug: "hitomi", Count: 1},
+		{Slug: SourceNone, Count: 1},
+	}
+	if len(counts) != len(want) {
+		t.Fatalf("SourceCounts = %+v, want %+v", counts, want)
+	}
+	for i, w := range want {
+		if counts[i] != w {
+			t.Errorf("counts[%d] = %+v, want %+v (full: %+v)", i, counts[i], w, counts)
+		}
+	}
+}

@@ -87,6 +87,7 @@ export namespace main {
 	    manga: search.Manga;
 	    pages: string[];
 	    tags: tag.Typed[];
+	    source_label: string;
 	    missing: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -98,6 +99,7 @@ export namespace main {
 	        this.manga = this.convertValues(source["manga"], search.Manga);
 	        this.pages = source["pages"];
 	        this.tags = this.convertValues(source["tags"], tag.Typed);
+	        this.source_label = source["source_label"];
 	        this.missing = source["missing"];
 	    }
 	
@@ -245,6 +247,7 @@ export namespace main {
 	    q: string;
 	    author_id: number;
 	    tags: string[];
+	    source: string;
 	    sort: string;
 	    seed: number;
 	    limit: number;
@@ -259,6 +262,7 @@ export namespace main {
 	        this.q = source["q"];
 	        this.author_id = source["author_id"];
 	        this.tags = source["tags"];
+	        this.source = source["source"];
 	        this.sort = source["sort"];
 	        this.seed = source["seed"];
 	        this.limit = source["limit"];
@@ -286,6 +290,22 @@ export namespace main {
 	    }
 	}
 	
+	export class SourceFacet {
+	    slug: string;
+	    label: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SourceFacet(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.slug = source["slug"];
+	        this.label = source["label"];
+	        this.count = source["count"];
+	    }
+	}
 	export class SourceState {
 	    slug: string;
 	    label: string;

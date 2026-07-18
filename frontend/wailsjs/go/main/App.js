@@ -46,6 +46,10 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetSourceFacets() {
+  return window['go']['main']['App']['GetSourceFacets']();
+}
+
 export function GetSources() {
   return window['go']['main']['App']['GetSources']();
 }

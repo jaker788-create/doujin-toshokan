@@ -29,6 +29,8 @@ export function GetManga(arg1:number):Promise<main.MangaDetail>;
 
 export function GetSettings():Promise<main.Settings>;
 
+export function GetSourceFacets():Promise<Array<main.SourceFacet>>;
+
 export function GetSources():Promise<Array<main.SourceState>>;
 
 export function GetUnimported():Promise<Array<main.UnimportedPreview>>;

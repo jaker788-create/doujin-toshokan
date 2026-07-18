@@ -63,16 +63,26 @@ var sorts = map[string]string{
 	"date":   "m.date_added DESC, m.id DESC",
 }
 
+// SourceNone is the SearchParams.SourceSlug sentinel meaning "never auto-tagged" —
+// rows whose source_slug is NULL (or blank). It is deliberately a value no provider
+// may register as its own slug; providers_test.go pins that against providerPresets,
+// because this package is a leaf that cannot import the registry to check itself.
+const SourceNone = "none"
+
 // SearchParams holds the optional filters. AuthorID 0 means "any author"; a Limit
 // of 0 or less means "no limit" (matching the Python limit=None default).
 type SearchParams struct {
 	Query    string
 	AuthorID int64
 	TagIDs   []int64
-	Sort     string
-	Seed     int64 // only used when Sort == "random"; selects one stable shuffle
-	Limit    int
-	Offset   int
+	// SourceSlug filters by which metadata source a title's tags came from: "" means
+	// any source (including untagged), SourceNone means untagged only, and any other
+	// value matches manga.source_slug exactly.
+	SourceSlug string
+	Sort       string
+	Seed       int64 // only used when Sort == "random"; selects one stable shuffle
+	Limit      int
+	Offset     int
 }
 
 func placeholders(n int) string {
@@ -151,6 +161,17 @@ func SearchManga(q store.Querier, p SearchParams) ([]Manga, error) {
 		where = append(where, "m.author_id = ?")
 		args = append(args, p.AuthorID)
 	}
+	if p.SourceSlug != "" {
+		// A title backfilled by migration 007 but never re-tagged can hold '' rather
+		// than NULL, so "untagged" has to cover both spellings or those rows would
+		// vanish from every filter value at once.
+		if p.SourceSlug == SourceNone {
+			where = append(where, "(m.source_slug IS NULL OR m.source_slug = '')")
+		} else {
+			where = append(where, "m.source_slug = ?")
+			args = append(args, p.SourceSlug)
+		}
+	}
 	if len(where) > 0 {
 		parts = append(parts, "WHERE "+strings.Join(where, " AND "))
 	}
@@ -186,6 +207,44 @@ func SearchManga(q store.Querier, p SearchParams) ([]Manga, error) {
 	}
 	defer rows.Close()
 	return scanMangaRows(rows)
+}
+
+// SourceCount is one row of the source-provenance facet: how many titles carry a
+// given source_slug. Slug is SourceNone for the never-auto-tagged bucket.
+type SourceCount struct {
+	Slug  string `json:"slug"`
+	Count int    `json:"count"`
+}
+
+// SourceCounts returns the library's source-provenance breakdown, ordered by
+// descending count then slug, with the untagged bucket (SourceNone) last regardless
+// of size — it is the "everything else" row, not a source.
+//
+// The options come from what the library actually CONTAINS, not from the provider
+// registry: a title keeps its source_slug after that source is disabled or removed
+// from config, and a filter built off the enabled sources would silently offer no way
+// to find those titles.
+func SourceCounts(q store.Querier) ([]SourceCount, error) {
+	// NULLIF folds a blank slug into the NULL bucket so untagged is counted once.
+	// The ORDER BY's leading term is the untagged-last rule: `slug = ?` is 0/1 in
+	// SQLite, so ASC sorts the real sources ahead of it whatever the counts are.
+	rows, err := q.Query(
+		"SELECT COALESCE(NULLIF(source_slug, ''), ?) AS slug, COUNT(*) AS n FROM manga "+
+			"GROUP BY slug ORDER BY (slug = ?) ASC, n DESC, slug ASC",
+		SourceNone, SourceNone)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SourceCount{}
+	for rows.Next() {
+		var sc SourceCount
+		if err := rows.Scan(&sc.Slug, &sc.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
 }
 
 // SuggestTags returns up to limit tag names matching prefix (normalized).

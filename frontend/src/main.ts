@@ -1,6 +1,7 @@
 import './theme.css';
 import {
-    Search, Count, GetManga, GetAuthor, SuggestTags, SuggestTagsTyped, SuggestAuthors,
+    Search, Count, GetManga, GetAuthor, GetSourceFacets,
+    SuggestTags, SuggestTagsTyped, SuggestAuthors,
     UpdateTags, SetDisplayTitle, GetUnimported, Ingest, ImportAll, Rescan,
     CountMissing, RemoveMissing, DeleteManga,
     GetConfig, AddLibraryRoot, RemoveLibraryRoot,
@@ -14,6 +15,7 @@ import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
 
 type Manga = search.Manga;
 type MangaDetail = main.MangaDetail;
+type SourceFacet = main.SourceFacet;
 
 // The title shown to the user: a user-set display override when present, else the
 // canonical (folder-parsed) title. The canonical title is what nhentai matching uses, so
@@ -226,6 +228,10 @@ interface Filter {
     authorId: string;
     authorName: string;
     tags: string[];
+    // source is a provider slug ('nhentai', …), 'none' for titles that were never
+    // auto-tagged, or '' for any. The slug is the backend's, so it round-trips
+    // through the URL untranslated.
+    source: string;
     sort: string;
     seed: string; // only set when sort === 'random'; pins one stable shuffle
 }
@@ -285,6 +291,7 @@ function navigateToFilter(f: Filter): void {
     p.set('sort', f.sort);
     if (f.sort === 'random' && f.seed) p.set('seed', f.seed);
     if (f.authorId) p.set('author', f.authorId);
+    if (f.source) p.set('source', f.source);
     f.tags.filter(Boolean).forEach((t) => p.append('tag', t));
     const target = '#/?' + p.toString();
     if (location.hash === target) render();
@@ -305,7 +312,27 @@ function cardHtml(m: Manga): string {
     </div>`;
 }
 
-function libraryMarkup(total: number, sort: string): string {
+// sourcePicker renders the tag-provenance filter. It is omitted entirely when the
+// library has nothing to choose between (one bucket and no active filter) — on a
+// library that was never auto-tagged the control could only ever say "Untagged".
+function sourcePicker(facets: SourceFacet[], active: string): string {
+    if (facets.length < 2 && !active) return '';
+    const opts = [`<option value=""${active ? '' : ' selected'}>Any source</option>`];
+    for (const f of facets) {
+        opts.push(`<option value="${esc(f.slug)}"${f.slug === active ? ' selected' : ''}>${esc(f.label)} (${f.count})</option>`);
+    }
+    // An active slug the library no longer holds (its last title was retagged or
+    // deleted) still needs an option, or the select would silently show "Any source"
+    // while the filter is really applied.
+    if (active && !facets.some((f) => f.slug === active)) {
+        opts.push(`<option value="${esc(active)}" selected>${esc(active)} (0)</option>`);
+    }
+    return `<label class="builder-sortwrap">Source
+        <select class="builder-source" aria-label="Filter by tag source">${opts.join('')}</select>
+    </label>`;
+}
+
+function libraryMarkup(total: number, sort: string, facets: SourceFacet[], source: string): string {
     const sel = (v: string) => (sort === v ? ' selected' : '');
     const skeletons = Array.from({ length: 6 }, () =>
         `<div class="card skeleton" aria-hidden="true"><div class="card-cover"></div><div class="meta"></div></div>`).join('');
@@ -331,6 +358,7 @@ function libraryMarkup(total: number, sort: string): string {
             <button type="button" class="btn builder-shuffle${sort === 'random' ? ' is-on' : ''}" aria-pressed="${sort === 'random'}" title="Shuffle results">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>Shuffle
             </button>
+            ${sourcePicker(facets, source)}
             <label class="builder-sortwrap">Sort by
                 <select class="builder-sort" aria-label="Sort by">
                     <option value="title"${sel('title')}>Title</option>
@@ -350,6 +378,7 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
         authorId: params.get('author') || '',
         authorName: '',
         tags: params.getAll('tag').filter(Boolean),
+        source: params.get('source') || '',
         sort: params.get('sort') || 'title',
         seed: params.get('seed') || '',
     };
@@ -367,9 +396,15 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
     }
 
     let total = 0;
-    try { total = await Count(); } catch { /* ignore */ }
+    let facets: SourceFacet[] = [];
+    // Both are decoration around the grid: a failure here must not cost the user the
+    // library itself, so each degrades to its empty value.
+    const [totalRes, facetRes] = await Promise.allSettled([Count(), GetSourceFacets()]);
+    if (totalRes.status === 'fulfilled') total = totalRes.value;
+    if (facetRes.status === 'fulfilled') facets = facetRes.value;
+    else console.error(facetRes.reason);
 
-    viewEl().innerHTML = libraryMarkup(total, filter.sort);
+    viewEl().innerHTML = libraryMarkup(total, filter.sort, facets, filter.source);
     const grid = document.getElementById('grid')!;
     const sentinel = document.getElementById('scroll-sentinel')!;
 
@@ -399,6 +434,7 @@ async function renderLibrary(params: URLSearchParams): Promise<void> {
                 q: filter.titleText,
                 author_id: filter.authorId ? parseInt(filter.authorId, 10) : 0,
                 tags: filter.tags,
+                source: filter.source,
                 sort: filter.sort,
                 seed: filter.seed ? parseInt(filter.seed, 10) : 0,
                 limit: PAGE_SIZE,
@@ -574,6 +610,9 @@ function wireBuilder(filter: Filter): void {
     runBtn.addEventListener('click', () => { commit(); });
     // Picking an explicit sort exits shuffle (drop the seed so it leaves the URL).
     sortSel.addEventListener('change', () => { filter.sort = sortSel.value; filter.seed = ''; commit(); });
+    // The source picker is absent when the library has only one bucket to show.
+    const sourceSel = builder.querySelector('.builder-source') as HTMLSelectElement | null;
+    sourceSel?.addEventListener('change', () => { filter.source = sourceSel.value; commit(); });
     // Shuffle: switch to random and mint a fresh seed. Clicking again re-rolls.
     const shuffleBtn = builder.querySelector('.builder-shuffle') as HTMLButtonElement;
     shuffleBtn.addEventListener('click', () => {
@@ -615,6 +654,15 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
         ? `<div class="notice">Folder is missing on disk: ${esc(m.folder_path)}
              <button type="button" class="btn btn-danger" data-remove-manga>Remove from library</button></div>`
         : '';
+    // Where this title's tags came from. It links to the library filtered by the same
+    // source, so provenance is a way in rather than just a label. The ref (a gallery
+    // id, a UUID, a gid/token pair) rides in the tooltip: it reads badly inline and
+    // its shape is per-provider.
+    const srcChip = m.source_slug
+        ? `<span class="sep">·</span><a class="src-chip" href="#/?source=${encodeURIComponent(m.source_slug)}"
+             title="Tagged from ${esc(d.source_label || m.source_slug)}${m.source_ref ? ' — ' + esc(m.source_ref) : ''}"
+             >${esc(d.source_label || m.source_slug)}</a>`
+        : '';
     return `
     <a class="back-link" href="${esc(backHref)}">${esc(backLabel)}</a>
     <a class="reader-back" href="${esc(backHref)}" aria-label="${esc(backLabel)}" title="${esc(backLabel)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></a>
@@ -631,7 +679,7 @@ function readerMarkup(d: MangaDetail, backHref: string, backLabel: string): stri
             </form>
             <p class="title-canonical"${m.display_title && m.display_title.trim() ? '' : ' hidden'}>original: ${esc(m.title)}</p>
         </div>
-        <p class="byline">by <a class="author author-link" href="#/?author=${m.author_id}" data-author-name="${esc(m.author_name)}">${esc(m.author_name)}</a><span class="sep">·</span>${m.page_count} pages</p>
+        <p class="byline">by <a class="author author-link" href="#/?author=${m.author_id}" data-author-name="${esc(m.author_name)}">${esc(m.author_name)}</a><span class="sep">·</span>${m.page_count} pages${srcChip}</p>
         <div class="tags-block" data-manga="${m.id}">
             <p class="tagrow" id="tagrow">${tagrow}</p>
             <form class="tag-edit" hidden>

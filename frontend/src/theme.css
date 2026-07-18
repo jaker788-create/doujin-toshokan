@@ -159,7 +159,9 @@ header .nav-spacer { margin-left: auto; }
 }
 #filters input[type=search]::placeholder, .builder-value::placeholder { color: var(--paper-mute); font-style: italic; }
 #filters input[type=search]:focus, .builder-value:focus { border-color: var(--vermilion); box-shadow: 0 0 0 3px var(--vermilion-soft); outline: none; }
-#filters select, .builder-type, .builder-sort {
+/* Custom select skin. This is an explicit opt-in list, not `select` — a new select
+   renders as a raw native control until it is added here. */
+#filters select, .builder-type, .builder-sort, .builder-source {
   appearance: none;
   background: var(--ink-1) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' stroke='%23c9bfae' stroke-width='1.4' fill='none' stroke-linecap='round'/></svg>") no-repeat right var(--s-3) center;
   background-size: 10px;
@@ -353,6 +355,16 @@ header .nav-spacer { margin-left: auto; }
 .title-header .byline .author { color: var(--paper); text-decoration: none; }
 .title-header .byline .author:hover { color: var(--vermilion); }
 .title-header .byline .sep { color: var(--paper-mute); margin: 0 var(--s-2); font-style: normal; }
+/* Tag-provenance chip: which source this title's tags came from, linking to the library
+   filtered by it. Mono + upright to read as metadata against the italic display byline,
+   and quiet (rule border) so it never competes with the author. */
+.title-header .byline .src-chip {
+  font-family: var(--font-mono); font-style: normal; font-size: var(--step--1);
+  color: var(--paper-2); text-decoration: none;
+  border: 1px solid var(--rule); border-radius: var(--r-1);
+  padding: 0 var(--s-1); vertical-align: middle;
+}
+.title-header .byline .src-chip:hover { color: var(--vermilion); border-color: var(--vermilion); }
 /* Inline display-title editor: heading + a hover-revealed pencil on one row; the edit
    form and the "original" hint break to their own full-width lines below. */
 .title-edit { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s-3); margin-bottom: var(--s-3); }
