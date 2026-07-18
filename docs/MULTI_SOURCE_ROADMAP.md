@@ -355,10 +355,10 @@ there is no "tagged by X / untagged" filter. The matching path already carries p
 so this is a display + filter change, not plumbing — and it is what makes a mixed library
 legible after the fact rather than only at match time.
 
-**Still unverified across all of this: a live sweep through the GUI.** Every provider has
-been probed live and end-to-end (folder name → parser → API → mapped tags), but the sweep
-loop, the pooled review card and the per-source chips have never been driven through the
-real UI. That needs the nhentai key and a human at the window.
+**Verified in the GUI (2026-07-18).** Every provider was probed live end to end (folder
+name → parser → API → mapped tags) *and* driven through the real UI, closing the gap this
+section previously flagged: the sweep loop, the provider chain, the pooled review card and
+the per-source chips all behave as intended against a real library.
 
 Remaining Small items, all independent: **3.4** (rename `nhSearcher` → `providerSearcher`,
 `nhentai.go` → `tagging.go` — note `internal/mangadex/client.go`'s package doc already
