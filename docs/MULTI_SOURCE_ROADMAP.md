@@ -177,14 +177,31 @@ hitomi (**zero** requests). Against that: a thread-safe run cache with single-fl
 ordered progress emission, and `MaxOpenConns(1)` keeping applies serialized anyway. The loop
 is structured so it stays possible if a real sweep ever proves slow.
 
-### 2.3 MangaDex language + page-count handling
-MangaDex series have no single page count, and `candLangResolver` only reads language
-from *title decorations* (nhentai convention) — so MangaDex results never set
-`LangMatch` and never get the page bonus.
-- **Decision:** should the neutral `SearchResult` carry a provider-supplied `Language`
-  field (populated by MangaDex from `originalLanguage`) that `ScoreAll` prefers over the
-  title-decoration heuristic? Cleaner ranking for MangaDex; small change to `source` +
-  `autotag.ScoreAll` + `candLangResolver`. **Recommended.**
+### 2.3 MangaDex language + page-count handling — **language done, page count open**
+The **language** half landed (with 3.3): `SearchResult.Language` is provider-supplied and
+`candLangResolver` prefers it over the title-decoration heuristic.
+
+The **page-count** half is still open, and its effects are wider than "ranks a bit worse".
+A MangaDex series has chapters, not a single page count, so `NumPages` is always 0. Traced
+through the scorer, that means:
+
+| | Affected? |
+|---|---|
+| The displayed **title %** (`TitleScore`) | **No** — pure title similarity; page count never touches it |
+| Ranking `Score` | Loses `pageBonus` (0.5, large next to a 0–1 title score). Harmless *within* MangaDex — every candidate lacks it equally — but it is why the pooled review groups by provider instead of interleaving by score |
+| `qualifies` (auto vs review) | **Loses 2 of 4 routes.** `PagesClose && title≥0.6` and `ArtistMatch && PagesExact` both need `NumPages > 0`. Only artist+decent-title and near-perfect-title survive, so MangaDex needs a stronger signal to auto-apply |
+| `confidentMatch` (`nhentai.go`) | **Never fires** — it gates on `c.PagesClose`. So every MangaDex title runs the *full* search budget plus a catalog page-through even after a perfect hit. MangaDex titles are the most expensive in a sweep |
+| `pagesCloseTo` merge guard | Inert (returns true when either side ≤ 0), so the "don't merge a same-titled but differently-sized work" guard does nothing for MangaDex |
+
+Fixed already: the UI rendered `0p`, which read as an empty gallery rather than an absent
+signal; it now says "page count n/a".
+
+**Open decision:** should `confidentMatch` be allowed to stop early on artist-match + strong
+title when no page count exists? It would cut the request cost noticeably, at the price of
+the page gate that currently stops the ladder from ending on a plausible-but-wrong title.
+A chapter-count or first-chapter page count from MangaDex is *not* a substitute — it is not
+the same quantity as a doujin's page count and would corroborate nothing.
+
 - Content-rating filter (`contentRatings` in mangadex/client.go) is hardcoded to include
   adult content. Expose as a per-source setting? (Probably fine hardcoded for this app.)
 

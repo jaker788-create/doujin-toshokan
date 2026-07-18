@@ -772,6 +772,8 @@ footer { color: var(--paper-mute); font-family: var(--font-mono); font-size: var
 .nh-jp { color: var(--paper-2); font-size: var(--step--1); }
 .nh-meta { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); }
 .nh-pages.ok { color: var(--vermilion); }
+/* "page count n/a" — an absent signal, not a weak one; shouldn't read as a real 0. */
+.nh-pages.muted { opacity: .7; font-style: italic; }
 .nh-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
 .nh-tag { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-2); }
 .nh-more { font-family: var(--font-mono); font-size: var(--step--1); color: var(--paper-mute); font-style: italic; }

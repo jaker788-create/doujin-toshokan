@@ -1282,9 +1282,15 @@ function buildMatchPicker(
 
     res.candidates.forEach((c) => {
         const merged = (res.merge_gallery_ids || []).includes(c.gallery_id);
-        const pages = c.pages_exact
-            ? `<span class="nh-pages ok">${c.num_pages}p · exact (vs ${res.local_pages}p)</span>`
-            : `<span class="nh-pages">${c.num_pages}p (you have ${res.local_pages}p)</span>`;
+        // num_pages 0 means the source does not report one, not an empty gallery — MangaDex
+        // indexes series, which have chapters rather than a single page count. Rendering it
+        // as "0p" read as a broken result; it also means this candidate can never earn the
+        // page bonus or the page-corroborated auto-apply routes (see autotag.qualifies).
+        const pages = !c.num_pages
+            ? `<span class="nh-pages muted">page count n/a (you have ${res.local_pages}p)</span>`
+            : c.pages_exact
+                ? `<span class="nh-pages ok">${c.num_pages}p · exact (vs ${res.local_pages}p)</span>`
+                : `<span class="nh-pages">${c.num_pages}p (you have ${res.local_pages}p)</span>`;
         const jp = c.japanese_title ? `<span class="nh-jp">${esc(c.japanese_title)}</span>` : '';
         const tags = (c.tags && c.tags.length)
             ? `<div class="nh-tags">${renderTagChips(c.tags.slice(0, 24))}${
