@@ -13,10 +13,11 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > into ranking), **2.1** (folder-id prefix registry: nhentai + mangadex peel; the
 > shortcut is gated on the active provider), **3.1** (the query-struct refactor — the
 > string search contract is gone), **1.2** (the Hitomi provider — the first ID-only
-> source), and **2.2** (the provider chain: cross-provider id routing + ordered fallback,
-> which also carried most of **2.5**). **3.5 was attempted and reverted** — not the quick
-> win it looked like; see the item. Still open: **1.1** (E-Hentai, blocked on 2.4), the
-> library half of **2.5**, and the rest of §3.
+> source), **2.2** (the provider chain: cross-provider id routing + ordered fallback,
+> which also carried most of **2.5**), and **1.1** (the E-Hentai provider — keyless, so
+> **2.4 was never actually the gate** it was recorded as). **3.5 was attempted and
+> reverted** — not the quick win it looked like; see the item. Still open: the library
+> half of **2.5**, **2.4** (deferred, no longer blocking anything), and the rest of §3.
 
 ---
 
@@ -24,9 +25,11 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 
 - `internal/source` — neutral model (`SearchResult`/`GalleryDetail`, string ids,
   `tag.Typed` tags) + `Provider` interface.
-- `internal/nhentai`, `internal/mangadex` — two providers.
-- `providers.go` — registry (`providerPresets`), `buildProvider`, `activeProvider()`,
-  and the `GetSources`/`SetSourceConfig`/`SetActiveSource` bound methods.
+- `internal/nhentai`, `internal/mangadex`, `internal/hitomi`, `internal/ehentai` — four
+  providers; the last two are ID-only (empty `Search` by contract).
+- `providers.go` — registry (`providerPresets`, carrying `NeedsKey`/`IDOnly`/`RefHint`),
+  `buildProvider`, `activeProvider()`, `chainProviders()`/`providerBySlug()`, and the
+  `GetSources`/`SetSourceConfig`/`SetActiveSource` bound methods.
 - `config.Config.Sources[]` + `ActiveSource`, legacy `nhentai_api_key` synth.
 - migration 007 — `source_slug`/`source_ref` link columns.
 - Frontend source picker (Scan page) + per-source labels.
@@ -35,24 +38,60 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 
 ## 1. Deferred deliverables
 
-### 1.1 E-Hentai / ExHentai provider — **M**
-Agreed scope: **ID + manual only** (no HTML search scraping). E-Hentai's `gmetadata`
-API resolves galleries by id and returns `title`/`title_jpn`/`filecount` + namespaced
-tags that map ~1:1 onto our `tag` subjects — but it has **no JSON free-text search**.
+### 1.1 E-Hentai provider — ✅ DONE
+`internal/ehentai` implements `source.Provider` as the **second ID-only source**, scoped
+as agreed to **ID + manual only** (no HTML search scraping). Metadata comes from
+E-Hentai's one public API:
 
-- New `internal/ehentai/client.go` implementing `source.Provider`.
-  - `GalleryByID("<gid>/<token>")` → `POST /api.php` `{method:"gmetadata", gidlist:[[gid,token]]}`.
-  - `Search(...)` returns an empty response (best-effort contract already allows this —
-    see the `source` package doc). The title still tags via the folder-id shortcut and
-    manual apply.
-- Auth: session cookies (`ipb_member_id`, `ipb_pass_hash`) for ExHentai content — carry
-  them in `config.SourceConfig.Secrets` (the field already exists for exactly this).
-- Add to `providerPresets` with `NeedsKey:false` but a new "needs cookies" state (see
-  decision 2.4).
-- Folder-id prefix: generalize `doujin.sourcePrefix` (decision 2.1) so `ehentai-<gid>-<token>`
-  routes here.
+```
+POST https://api.e-hentai.org/api.php
+{"method":"gdata","gidlist":[[618395,"0439fa3666"]],"namespace":1}
+```
 
-**Depends on:** decision 2.1 (prefix generalization) and 2.4 (cookie auth in the UI).
+Mapping is close to 1:1 — the `artist`/`group`/`parody`/`character`/`language` namespaces
+land on the matching subjects, the content namespaces (`male`/`female`/`mixed`/`other`)
+flatten to the generic Tag subject the way hitomi's gender namespace does, `filecount`
+gives the page count, and `category` ("Doujinshi", "Manga", …) becomes a Category.
+
+**The 2.4 gate turned out not to apply.** This item was blocked on cookie auth; the API
+answers unauthenticated. Cookies would only buy **ExHentai-exclusive** galleries, which is
+a much narrower case than "E-Hentai needs auth" — so the provider ships keyless
+(`NeedsKey:false`) and `SourceConfig.Secrets` stays unused until a genuinely missing
+gallery justifies the UI work. See 2.4.
+
+**Four things the live API does that a spec-reading implementation gets wrong** — all
+found by probing it, none visible against a fake server built from the field names:
+
+1. **The method is `gdata`.** `gmetadata` — what this document said, and the natural guess
+   since it is the key the response object uses — answers
+   `{"error":"Unsupported method provided"}`.
+2. **`"namespace":1` is load-bearing.** Without it tags come back bare (`"touhou project"`)
+   instead of namespaced (`"parody:touhou project"`), and the entire subject mapping
+   silently collapses to untyped General tags while the response still looks healthy.
+3. **Titles are HTML-escaped** (`aren&#039;t`, `&quot;`). Left as-is, that is the string
+   compared against the local folder name, so every entity is lost match score.
+4. **Errors ride inside a 200.** An unknown gallery or a wrong token returns
+   `{"gmetadata":[{"gid":…,"error":"Key missing, or incorrect key provided."}]}` — a
+   status-only check decodes a blank success and applies it.
+
+**The ref is a pair, not an id.** A gallery is `(gid, token)`; the token is a capability,
+and the right gid with the wrong token is refused. The neutral id is `"<gid>/<token>"`; the
+folder form joins them with a dash because a slash cannot be in a filename. `GalleryByID`
+accepts either and always returns the canonical slash form, so `manga.source_ref` is stable
+regardless of which spelling arrived. The `sourceDefs` row therefore needed a real matcher
+(`leadingGidToken`, gid + exactly 10 hex) rather than reusing `leadingDigits`.
+
+**This forced one UI change.** The Settings `id_only` note built its example as
+`<slug>-<id>`, which is simply wrong for a two-part ref — a user following it would name
+folders `ehentai-618395` and get silent no-matches. Ref shape is provider knowledge, so
+`providerPreset.RefHint` → `SourceState.ref_hint` now supplies it, tied by test to what
+`internal/doujin`'s `sourceDefs` actually parses.
+
+**Not done (deliberate):** no thumbnail, though the response carries an absolute `thumb`
+URL and it would be useful — `source.GalleryDetail` has no `Thumbnail` field, and adding
+one is 3.5's change, not something to smuggle in here. Uploader/rating/torrents/parent-gid
+are not decoded: nothing consumes them, and each is a field that could change type under us
+for no benefit.
 
 ### 1.2 Hitomi.la provider — ✅ DONE
 `internal/hitomi` implements `source.Provider` as the **first ID-only source**: `Search`
@@ -205,12 +244,23 @@ the same quantity as a doujin's page count and would corroborate nothing.
 - Content-rating filter (`contentRatings` in mangadex/client.go) is hardcoded to include
   adult content. Expose as a per-source setting? (Probably fine hardcoded for this app.)
 
-### 2.4 E-Hentai cookie auth in the UI
-`SourceConfig.Secrets` exists but the Settings picker only handles an API key. E-Hentai
-needs two cookies.
-- **Decision:** generic key/value secret fields per source, or a bespoke two-field
-  E-Hentai form? A small generic "secrets" editor keyed off a provider-declared schema
-  scales better as sources grow.
+### 2.4 E-Hentai cookie auth in the UI — **deferred, and no longer a gate**
+This was recorded as blocking 1.1 on the premise that E-Hentai needs auth. It does not:
+`api.e-hentai.org`'s `gdata` method answers unauthenticated, and 1.1 shipped keyless.
+
+What cookies (`ipb_member_id`, `ipb_pass_hash`) would actually buy is **ExHentai-exclusive
+and expunged galleries** — a real but narrow gap, and one no user has hit yet.
+`SourceConfig.Secrets` still exists for it.
+
+The decision itself is unchanged and still worth making *before* writing any of it: a
+generic key/value secrets editor keyed off a provider-declared schema, or a bespoke
+two-field E-Hentai form? The generic one scales better as sources grow — and note that
+`providerPreset` has since grown `NeedsKey`, `IDOnly` and `RefHint`, so a provider-declared
+field schema is the shape that registry is already trending toward.
+
+**Trigger to revisit:** a folder whose `ehentai-<gid>-<token>` ref returns
+"Gallery not found" while the gallery plainly exists on ExHentai. Until then this is
+speculative UI for a hypothetical user.
 
 ### 2.5 Source provenance in the library UI — **partly done**
 Provenance now rides through the *matching* path, because 2.2 made it a correctness
@@ -295,22 +345,24 @@ query-struct refactor (3.1) ──► ✅ done — providers now own their wire 
 prefix registry (2.1) ────────► ✅ done
 Hitomi provider (1.2) ────────► ✅ done — first ID-only provider; id_only surfaced in the UI
 multi-source fallback (2.2) ──► ✅ done — provider chain; id routing + ordered fallback
-E-Hentai provider (1.1) ──────► NEXT: needs 2.4 (cookie auth in the UI); reuses 1.2's shape
+E-Hentai provider (1.1) ──────► ✅ done — keyless; 2.4 was not the gate it looked like
+library provenance (2.5) ─────► NEXT: cheapest remaining win, and now four sources can mix
 ```
 
-**Next up: 1.1 (E-Hentai) — but decide 2.4 first.** 1.2 proved the ID-only shape end to end
-and 2.2 built the chain that makes a fourth provider worth having, so E-Hentai is now mostly
-the same client with a different DTO: `providerPreset.IDOnly` and the id-routing phase both
-apply to it unchanged, and `SourceConfig.Secrets` already exists for its session cookies.
-What is genuinely new is **cookie auth in the Settings UI (2.4)** — a decision, not a
-mechanical port, and worth settling before the client is written.
+**Next up: the library half of 2.5.** Four providers are live and a sweep can genuinely
+produce a mixed library, yet `manga.source_slug` is still invisible on the detail page and
+there is no "tagged by X / untagged" filter. The matching path already carries provenance,
+so this is a display + filter change, not plumbing — and it is what makes a mixed library
+legible after the fact rather than only at match time.
 
-**The cheapest remaining win is the library half of 2.5.** A sweep can now genuinely produce
-a mixed library, and `manga.source_slug` is still invisible on the detail page. The matching
-path already carries provenance, so this is a display + filter change, not plumbing.
+**Still unverified across all of this: a live sweep through the GUI.** Every provider has
+been probed live and end-to-end (folder name → parser → API → mapped tags), but the sweep
+loop, the pooled review card and the per-source chips have never been driven through the
+real UI. That needs the nhentai key and a human at the window.
 
 Remaining Small items, all independent: **3.4** (rename `nhSearcher` → `providerSearcher`,
 `nhentai.go` → `tagging.go` — note `internal/mangadex/client.go`'s package doc already
 refers to "the root tagging.go", and the file now holds the chain as well as the matcher, so
-the name has drifted further), **3.6** (retire the legacy `Settings.HasNhentaiKey`),
-**3.7** (hide `#id` for non-numeric ids).
+the name has drifted further), **3.6** (retire the legacy `Settings.HasNhentaiKey`), **3.7**
+(hide `#id` for non-numeric ids — now two sources deep, since e-hentai's
+`#618395/0439fa3666` reads as badly as a MangaDex UUID).
