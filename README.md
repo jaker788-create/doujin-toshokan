@@ -4,7 +4,7 @@ This is a personal project, it's not meant to be a complete or "official" releas
 
 ## Run the bundled release
 
-Bundled ARM64 Windows release: https://github.com/jaker788-create/doujin-toshokan/releases — download `doujin.exe` and run it. Windows 11 already includes the WebView2 runtime it renders into; on Windows 10, install the Evergreen WebView2 runtime if prompted.
+Bundled ARM64 and AMD64 Windows release: https://github.com/jaker788-create/doujin-toshokan/releases — download `doujin.exe` and run it. Windows 11 already includes the WebView2 runtime it renders into; on Windows 10, install the Evergreen WebView2 runtime if prompted.
 
 First launch creates `%APPDATA%\doujin\config.json`. Open the **Scan / Ingest** page and use **Add folder…** to point it at the folders your collection lives in (e.g. `C:\Manga`), then **Import all** (or import titles one at a time).
 
