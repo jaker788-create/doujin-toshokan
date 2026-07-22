@@ -120,6 +120,13 @@ type SearchResponse struct {
 
 // GalleryDetail is one gallery's full metadata, including its named, subject-typed
 // tags. Titles are flattened (not nested) so every provider fills the same fields.
+//
+// Thumbnail, like SearchResult.Thumbnail, is an absolute cover URL the provider builds
+// server-side — nhentai from its detail images object, MangaDex/E-Hentai from the cover
+// the detail response already carries. It exists so a detail-fetched candidate (the
+// id-in-folder shortcut, or a review preview) shows a cover without the frontend
+// reconstructing a per-site CDN path. "" when the provider has none to offer (hitomi,
+// whose covers derive from a separately-churning URL script).
 type GalleryDetail struct {
 	ID            string      `json:"id"`
 	MediaID       string      `json:"media_id"`
@@ -127,6 +134,7 @@ type GalleryDetail struct {
 	JapaneseTitle string      `json:"japanese_title"`
 	PrettyTitle   string      `json:"pretty_title"`
 	GalleryURL    string      `json:"gallery_url"`
+	Thumbnail     string      `json:"thumbnail"`
 	NumPages      int         `json:"num_pages"`
 	Tags          []tag.Typed `json:"tags"`
 }

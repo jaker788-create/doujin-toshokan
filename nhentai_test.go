@@ -302,6 +302,25 @@ func TestToCandidatePopulatesCoverLangAndURL(t *testing.T) {
 	}
 }
 
+// The folder-id shortcut candidate is built from a detail, not a search list item, so its
+// cover comes from GalleryDetail.Thumbnail. Before roadmap 3.5 that field did not exist and
+// the shortcut relied on the frontend rebuilding a CDN path from media_id; the cover URL now
+// rides through server-side.
+func TestGalleryIDCandidateCarriesThumbnail(t *testing.T) {
+	d := &source.GalleryDetail{
+		ID:           "271687",
+		MediaID:      "999",
+		Thumbnail:    "https://t.nhentai.net/galleries/999/thumb.png",
+		GalleryURL:   "https://nhentai.net/g/271687/",
+		EnglishTitle: "X",
+		NumPages:     30,
+	}
+	c := galleryIDCandidate(d, 30, matchInputs("", "X", ""))
+	if c.Thumbnail != d.Thumbnail {
+		t.Errorf("Thumbnail = %q, want %q", c.Thumbnail, d.Thumbnail)
+	}
+}
+
 func TestShortlistFlagsArtistAndParodyOverlap(t *testing.T) {
 	mi := matchInputs("/lib/[Group (Sanada)] T (Kemono Jihen) [English]", "T", "")
 	ranked := []autotag.Candidate{

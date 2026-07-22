@@ -27,9 +27,13 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > strong title when a provider reports no page count. **2.4 is decided: no cookie auth** —
 > the keyless `gdata` API is enough and cookies buy only ExHentai-exclusive galleries
 > nobody has needed; `SourceConfig.Secrets` stays as the seam if that ever changes.
-> **3.7** landed too (hide the `#id` for non-numeric ids in the match picker). Still open:
-> **3.5** and **3.8** — the two remaining **M** items. **3.9** (per-source rate-limit config)
-> also landed: `SourceConfig.RateLimitMs` overrides a client's request spacing.
+> **3.7** landed too (hide the `#id` for non-numeric ids in the match picker). **3.9**
+> (per-source rate-limit config) also landed: `SourceConfig.RateLimitMs` overrides a
+> client's request spacing. And **3.5** finally landed: `source.GalleryDetail` grew a
+> `Thumbnail` field the providers fill server-side (nhentai assembles it from the detail
+> `images` type code, MangaDex/E-Hentai carry the cover the response already holds), so the
+> frontend's nhentai `media_id` + four-extension CDN cascade is gone. Only **3.8** — the
+> end-to-end `MatchSource` test — remains open.
 
 ---
 
@@ -99,11 +103,10 @@ folders `ehentai-618395` and get silent no-matches. Ref shape is provider knowle
 `providerPreset.RefHint` → `SourceState.ref_hint` now supplies it, tied by test to what
 `internal/doujin`'s `sourceDefs` actually parses.
 
-**Not done (deliberate):** no thumbnail, though the response carries an absolute `thumb`
-URL and it would be useful — `source.GalleryDetail` has no `Thumbnail` field, and adding
-one is 3.5's change, not something to smuggle in here. Uploader/rating/torrents/parent-gid
-are not decoded: nothing consumes them, and each is a field that could change type under us
-for no benefit.
+**Thumbnail: now wired (3.5).** The response's absolute `thumb` URL rides straight onto
+`GalleryDetail.Thumbnail` — the field 3.5 added, which this item deferred to it.
+Uploader/rating/torrents/parent-gid stay undecoded: nothing consumes them, and each is a
+field that could change type under us for no benefit.
 
 ### 1.2 Hitomi.la provider — ✅ DONE
 `internal/hitomi` implements `source.Provider` as the **first ID-only source**: `Search`
@@ -348,19 +351,26 @@ its faceted count.
    `internal/nhentai/client.go`'s package doc already pointed at. The companion test file
    keeps its `nhentai_test.go` name — it holds broader app tests (ingest, remove-missing,
    delete) beyond the tagging surface, so renaming it would overstate the move.
-5. **Drop the frontend's nhentai CDN reconstruction — ~~S~~ M.** `coverCandidates`/`wireCover`
-   in `main.ts` rebuild `t.nhentai.net/...` from `media_id`. It *looks* like every provider
-   supplies an absolute `thumbnail` (nhentai search + MangaDex do), so the fallback reads as
-   nhentai-specific dead weight.
-   - **⚠ NOT dead weight — attempted 2026-07-17, reverted.** `source.GalleryDetail` has no
-     `Thumbnail` field, so **detail-fetched** candidates carry only `media_id`: the
-     `nhentai-<id>` folder-id shortcut (`galleryIDCandidate`) and the detail-fetched top
-     few build their cover *solely* from the reconstruction. Removing it blanked every
-     nhentai preview cover. A real fix must supply the cover **server-side**: add
-     `Thumbnail` to `GalleryDetail` and have nhentai's `GalleryByID` build the URL —
-     parsing the cover *extension* from the v2 detail API's `images` object (`t = j/p/g/w`),
-     which is the whole reason the frontend cascades over four extensions. Only then can the
-     frontend fallback go. So this is **M**, not S, and gated on a `source` type change.
+5. **Drop the frontend's nhentai CDN reconstruction — ✅ DONE.** The `media_id` +
+   four-extension cascade (`coverCandidates`/`COVER_EXTS`) is gone from `main.ts`; `wireCover`
+   now takes the one absolute `thumbnail` the backend supplies and falls back to a neutral
+   tile. The gate the reverted 2026-07-17 attempt hit — detail-fetched candidates carrying
+   only `media_id` — is closed by supplying the cover **server-side**:
+   - `source.GalleryDetail` grew a `Thumbnail` field (documented as an absolute cover URL the
+     provider builds, mirroring `SearchResult.Thumbnail`).
+   - nhentai's `GalleryByID` assembles the URL the detail response leaves implicit: `thumbURL`
+     joins `media_id` with the extension from the `images.thumbnail` type code (`coverExt`:
+     `j/p/g/w` → jpg/png/gif/webp, unknown → jpg). That one-letter code is precisely what the
+     frontend used to guess by cascading over four extensions.
+   - MangaDex's `GalleryByID` carries the cover `mapSearchResult` already built (it requests
+     `includes[]=cover_art`); E-Hentai now decodes the absolute `thumb` URL its response
+     always carried (the thumbnail 1.1 deferred to this item). Hitomi stays coverless by
+     design (its cover URLs derive from a separately-churning script).
+   - `galleryIDCandidate` (the folder-id shortcut) and the review detail-fetch enrichment both
+     take `GalleryDetail.Thumbnail`, so every detail-fetched candidate now has a server cover.
+   - Tests: `TestThumbURLFromImagesType` (extension map + empty-media-id guard),
+     nhentai/ehentai/mangadex `GalleryByID` cover assertions, and
+     `TestGalleryIDCandidateCarriesThumbnail`.
 6. **Retire legacy `Settings.HasNhentaiKey`/`NhentaiUserAgent` — ✅ DONE.** Both fields are
    gone from the `Settings` DTO. The UI reads key presence from `SourceState.HasKey` and the
    per-source User-Agent from `SourceState.UserAgent` (both via `GetSources`) — the key-save
@@ -413,19 +423,23 @@ confident-match early stop (2.3) ► ✅ done — no-page-count titles stop on a
 e-hentai cookies (2.4) ───────► ❌ won't do — keyless API is enough
 id display (3.7) ─────────────► ✅ done — non-numeric ids hidden in the match picker
 rate-limit config (3.9) ──────► ✅ done — SourceConfig.RateLimitMs overrides the throttle
+server-side covers (3.5) ─────► ✅ done — GalleryDetail.Thumbnail; frontend cascade removed
 ```
 
-**Next up: the two remaining §3 items**, both **M** and independent: **3.5** (drop the
-frontend nhentai CDN reconstruction — gated on adding `Thumbnail` to `source.GalleryDetail`)
-and **3.8** (an end-to-end `MatchSource` test with a MangaDex fake). Every **S** item is now
-done, and with 2.3 and 2.4 resolved, no open decisions remain.
+**Next up: the one remaining §3 item — 3.8** (an end-to-end `MatchSource` test with a
+MangaDex fake). Every **S** item is done, every open decision is resolved, and **3.5** was
+the last of the **M** items besides it.
 
 **Verified in the GUI (2026-07-18).** Every provider was probed live end to end (folder
 name → parser → API → mapped tags) *and* driven through the real UI, closing the gap this
 section previously flagged: the sweep loop, the provider chain, the pooled review card and
 the per-source chips all behave as intended against a real library.
 
-Remaining: the two **M** items — **3.5** (drop the frontend CDN reconstruction, gated on a
-`source.GalleryDetail.Thumbnail` field) and **3.8** (an end-to-end `MatchSource` test with a
-MangaDex fake). **3.4**, **3.6**, **3.7** and **3.9** landed this branch; every **S** item
-in §3 is now done.
+Remaining: one **M** item — **3.8** (an end-to-end `MatchSource` test with a MangaDex fake).
+**3.4**, **3.5**, **3.6**, **3.7** and **3.9** landed this branch; every **S** item in §3 is
+done and no open decisions remain.
+
+> **GUI note (3.5).** The cover-URL construction is unit-tested end to end (type code →
+> extension → absolute URL) for all three providers, but the actual image load in WebView2 —
+> that the server-built covers render on the folder-id shortcut card and the review previews —
+> is a visual check still to be done in a live session.

@@ -84,6 +84,21 @@ type nhTag struct {
 	Count int    `json:"count"`
 }
 
+// nhImage is one image descriptor in a gallery detail's images object. Only the type
+// code ("t") is read — a one-letter file-extension code (j=jpg, p=png, g=gif, w=webp);
+// the width/height are ignored.
+type nhImage struct {
+	Type string `json:"t"`
+}
+
+// nhImages is a gallery detail's images object. The search list item ships an absolute
+// thumbnail URL, but the detail response leaves it implicit — only this type code plus
+// the media id, which is why a detail-fetched cover has to be assembled here.
+type nhImages struct {
+	Cover     nhImage `json:"cover"`
+	Thumbnail nhImage `json:"thumbnail"`
+}
+
 // nhGalleryDetail is a /galleries/{id} response. Unlike search list items, its title
 // is an object and its tags carry names + types.
 type nhGalleryDetail struct {
@@ -93,10 +108,11 @@ type nhGalleryDetail struct {
 		Japanese string `json:"japanese"`
 		Pretty   string `json:"pretty"`
 	} `json:"title"`
-	MediaID   string  `json:"media_id"`
-	NumPages  int     `json:"num_pages"`
-	Scanlator string  `json:"scanlator"`
-	Tags      []nhTag `json:"tags"`
+	MediaID   string   `json:"media_id"`
+	NumPages  int      `json:"num_pages"`
+	Scanlator string   `json:"scanlator"`
+	Images    nhImages `json:"images"`
+	Tags      []nhTag  `json:"tags"`
 }
 
 // Client is a rate-limited nhentai v2 client implementing source.Provider. The zero
@@ -153,6 +169,35 @@ func (c *Client) Label() string { return Label }
 
 // galleryURL builds the public gallery page URL for a gallery id.
 func galleryURL(id int64) string { return fmt.Sprintf("https://nhentai.net/g/%d/", id) }
+
+// coverExt maps nhentai's one-letter image type code to a file extension. The v2 detail
+// API reports a cover's real extension only as this code, so a URL built without it would
+// have to guess — which is the four-extension cascade the frontend used to run. Anything
+// unexpected falls back to jpg, nhentai's overwhelmingly common cover format (the old
+// frontend cascade tried jpg first for the same reason).
+func coverExt(code string) string {
+	switch code {
+	case "p":
+		return "png"
+	case "g":
+		return "gif"
+	case "w":
+		return "webp"
+	default: // "j" and any future/unknown code
+		return "jpg"
+	}
+}
+
+// thumbURL assembles the absolute cover-thumbnail URL a detail response leaves implicit,
+// from the gallery's media id and image type code. It mirrors the URL a /search list item
+// already carries, so a detail-fetched candidate shows the same cover a searched one would.
+// An empty media id yields "" rather than a path that could never resolve.
+func thumbURL(mediaID, typeCode string) string {
+	if mediaID == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://t.nhentai.net/galleries/%s/thumb.%s", mediaID, coverExt(typeCode))
+}
 
 // buildQuery renders a neutral source.SearchQuery into nhentai's own search syntax
 // (quoted phrases, artist:/title:/language: filters). This is the only place in the app
@@ -240,6 +285,7 @@ func (c *Client) GalleryByID(ctx context.Context, id string) (*source.GalleryDet
 		JapaneseTitle: out.Title.Japanese,
 		PrettyTitle:   out.Title.Pretty,
 		GalleryURL:    galleryURL(out.ID),
+		Thumbnail:     thumbURL(out.MediaID, out.Images.Thumbnail.Type),
 		NumPages:      out.NumPages,
 		Tags:          tags,
 	}, nil

@@ -33,9 +33,11 @@ const searchBody = `{
 
 const detailBody = `{
   "id": 653427,
+  "media_id": "123",
   "title": {"english": "Karakishi Youhei-dan Compilation", "japanese": "", "pretty": "Karakishi"},
   "num_pages": 50,
   "scanlator": "",
+  "images": {"cover": {"t": "j", "w": 350, "h": 495}, "thumbnail": {"t": "w", "w": 250, "h": 350}},
   "tags": [
     {"id": 33172, "type": "category", "name": "doujinshi", "slug": "doujinshi", "count": 485878},
     {"id": 13159, "type": "parody", "name": "naruto", "slug": "naruto", "count": 2142},
@@ -155,6 +157,15 @@ func TestGalleryByIDDecodesTypedTags(t *testing.T) {
 	if d.EnglishTitle != "Karakishi Youhei-dan Compilation" {
 		t.Errorf("english title = %q", d.EnglishTitle)
 	}
+	// The detail response has no thumbnail URL of its own — it is assembled from media_id
+	// plus the images.thumbnail type code ("w" -> webp), so a detail-fetched candidate (the
+	// folder-id shortcut) shows the same cover a searched one would (roadmap 3.5).
+	if d.MediaID != "123" {
+		t.Errorf("media_id = %q, want 123", d.MediaID)
+	}
+	if want := "https://t.nhentai.net/galleries/123/thumb.webp"; d.Thumbnail != want {
+		t.Errorf("thumbnail = %q, want %q", d.Thumbnail, want)
+	}
 	if len(d.Tags) != 3 {
 		t.Fatalf("got %d tags, want 3", len(d.Tags))
 	}
@@ -228,6 +239,28 @@ func TestNon2xxReturnsError(t *testing.T) {
 	_, err := testClient(srv).Search(context.Background(), source.SearchQuery{Title: "x", Page: 1})
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Errorf("err = %v, want a 403 error", err)
+	}
+}
+
+// thumbURL assembles the cover URL a detail response only implies. The type code picks the
+// extension the frontend used to guess at across four tries; an empty media id yields no URL
+// rather than an unresolvable path. (roadmap 3.5)
+func TestThumbURLFromImagesType(t *testing.T) {
+	cases := []struct {
+		mediaID, code, want string
+	}{
+		{"123", "j", "https://t.nhentai.net/galleries/123/thumb.jpg"},
+		{"123", "p", "https://t.nhentai.net/galleries/123/thumb.png"},
+		{"123", "g", "https://t.nhentai.net/galleries/123/thumb.gif"},
+		{"123", "w", "https://t.nhentai.net/galleries/123/thumb.webp"},
+		{"123", "", "https://t.nhentai.net/galleries/123/thumb.jpg"},  // unknown -> jpg
+		{"123", "x", "https://t.nhentai.net/galleries/123/thumb.jpg"}, // future code -> jpg
+		{"", "j", ""}, // no media id -> no URL
+	}
+	for _, c := range cases {
+		if got := thumbURL(c.mediaID, c.code); got != c.want {
+			t.Errorf("thumbURL(%q, %q) = %q, want %q", c.mediaID, c.code, got, c.want)
+		}
 	}
 }
 

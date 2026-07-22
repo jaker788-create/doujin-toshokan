@@ -174,6 +174,25 @@ func TestSearchMapsResults(t *testing.T) {
 	}
 }
 
+// GalleryByID requests includes[]=cover_art, so the cover URL mapSearchResult builds must
+// ride onto the neutral detail — a detail-fetched candidate (the id-in-folder shortcut)
+// otherwise has no cover to show (roadmap 3.5).
+func TestGalleryByIDCarriesCover(t *testing.T) {
+	const detailBody = `{"data":{"id":"abc-123","type":"manga","attributes":{"title":{"en":"Naruto"},"originalLanguage":"ja"},"relationships":[{"id":"c1","type":"cover_art","attributes":{"fileName":"cover.jpg"}}]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(detailBody))
+	}))
+	defer srv.Close()
+
+	d, err := testClient(srv).GalleryByID(context.Background(), "abc-123")
+	if err != nil {
+		t.Fatalf("GalleryByID: %v", err)
+	}
+	if want := "https://uploads.mangadex.org/covers/abc-123/cover.jpg.256.jpg"; d.Thumbnail != want {
+		t.Errorf("thumbnail = %q, want %q", d.Thumbnail, want)
+	}
+}
+
 // The language filter must go out under MangaDex's SINGULAR parameter name. The plural
 // spelling is not merely ignored — it fails the whole request with a 400 ("The property
 // availableTranslatedLanguages is not defined and the definition does not allow additional

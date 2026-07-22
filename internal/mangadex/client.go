@@ -309,8 +309,11 @@ func (c *Client) GalleryByID(ctx context.Context, id string) (*source.GalleryDet
 		JapaneseTitle: sr.JapaneseTitle,
 		PrettyTitle:   sr.EnglishTitle,
 		GalleryURL:    sr.GalleryURL,
-		NumPages:      sr.NumPages,
-		Tags:          sr.Tags,
+		// includes[]=cover_art is requested above, so the cover URL is already built
+		// (mapSearchResult) — carry it so a detail-fetched candidate shows a cover too.
+		Thumbnail: sr.Thumbnail,
+		NumPages:  sr.NumPages,
+		Tags:      sr.Tags,
 	}, nil
 }
 

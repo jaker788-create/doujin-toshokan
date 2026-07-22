@@ -73,6 +73,10 @@ func TestGalleryByIDMapsMetadata(t *testing.T) {
 	if d.NumPages != 20 {
 		t.Errorf("NumPages = %d, want 20 (filecount)", d.NumPages)
 	}
+	// The response's absolute cover URL rides straight onto the neutral detail (roadmap 3.5).
+	if want := "https://ehgt.org/w/00/310/49862-ddt1sawg.webp"; d.Thumbnail != want {
+		t.Errorf("Thumbnail = %q, want %q", d.Thumbnail, want)
+	}
 	want := []tag.Typed{
 		{Name: "english", Type: tag.Language},
 		{Name: "translated", Type: tag.Language},

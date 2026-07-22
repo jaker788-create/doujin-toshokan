@@ -746,8 +746,9 @@ func (a *App) SetNhentaiKey(key string) error {
 	return config.Save(cfg, a.dataDir)
 }
 
-// SourceCandidate is one ranked match shown to the UI. MediaID/Thumbnail build the cover
-// image; GalleryURL opens the gallery in the browser. Language/LangMatch and
+// SourceCandidate is one ranked match shown to the UI. Thumbnail is the absolute cover
+// URL the provider built (MediaID is the gallery's media id, kept as identifying data);
+// GalleryURL opens the gallery in the browser. Language/LangMatch and
 // ArtistMatch/ParodyMatch drive the why-match badges. Tags is populated only for
 // detail-fetched candidates (the merge set or the top few); it is nil otherwise to
 // avoid a detail fetch per candidate. GalleryID is the provider's string id.
@@ -917,6 +918,11 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 		}
 		if d, derr := cRun.detail(a.ctx, res.Candidates[i].GalleryID); derr == nil {
 			res.Candidates[i].Tags = galleryTypedTags(d)
+			// A searched candidate already carries a cover; a provider that searches
+			// without one still gets it from the detail fetch here.
+			if res.Candidates[i].Thumbnail == "" && d.Thumbnail != "" {
+				res.Candidates[i].Thumbnail = d.Thumbnail
+			}
 			markOverlap(&res.Candidates[i], mi.artist, mi.parodies, d)
 		}
 	}
@@ -1109,6 +1115,7 @@ func galleryIDCandidate(d *source.GalleryDetail, localPages int, mi matchInput) 
 	c := SourceCandidate{
 		GalleryID:     d.ID,
 		MediaID:       d.MediaID,
+		Thumbnail:     d.Thumbnail,
 		GalleryURL:    d.GalleryURL,
 		EnglishTitle:  d.EnglishTitle,
 		JapaneseTitle: d.JapaneseTitle,

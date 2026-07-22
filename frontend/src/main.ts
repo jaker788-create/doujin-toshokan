@@ -163,34 +163,20 @@ function setReaderFitWidth(on: boolean): void {
     lsSet('reader.fitWidth', on ? '1' : '0');
 }
 
-// ───── nhentai cover (remote) ─────────────────────────────────────
-// WebView2 loads nhentai's public CDN directly, so candidate covers are plain remote
-// <img>s — no proxy. The cover's real extension isn't in the API, so wireCover walks
-// the candidates (absolute thumbnail first, then jpg/webp/png/gif from media_id) on
-// each load error and gives up to a neutral tile. NOTE: the media_id reconstruction is
-// load-bearing, not dead weight — a detail-fetched candidate (the nhentai-<id> folder-id
-// shortcut → galleryIDCandidate) comes from a source.GalleryDetail, which has no thumbnail
-// field, so media_id is its ONLY cover source. Don't drop it unless GalleryDetail grows a
-// server-built cover URL (see MULTI_SOURCE_ROADMAP.md §3.5).
-const COVER_EXTS = ['jpg', 'webp', 'png', 'gif'];
-function coverCandidates(c: main.SourceCandidate): string[] {
-    const srcs: string[] = [];
-    if (c.thumbnail && /^https?:\/\//.test(c.thumbnail)) srcs.push(c.thumbnail);
-    if (c.media_id) {
-        const id = encodeURIComponent(c.media_id);
-        for (const ext of COVER_EXTS) srcs.push(`https://t.nhentai.net/galleries/${id}/thumb.${ext}`);
-    }
-    return srcs;
-}
+// ───── candidate cover (remote) ───────────────────────────────────
+// WebView2 loads each provider's public CDN directly, so a candidate cover is a plain
+// remote <img> — no proxy. Every provider now supplies an absolute `thumbnail` server-side:
+// search list items always did, and detail-fetched candidates (the id-in-folder shortcut,
+// the review previews) do too, since source.GalleryDetail carries a provider-built cover URL
+// (see MULTI_SOURCE_ROADMAP.md §3.5). So there is no per-site path to reconstruct here — the
+// old media_id + four-extension cascade is gone. A missing or failed cover falls back to a
+// neutral tile.
 function wireCover(img: HTMLImageElement, c: main.SourceCandidate): void {
-    const srcs = coverCandidates(c);
-    let i = 0;
-    const next = () => {
-        if (i >= srcs.length) { img.classList.add('nh-cover-missing'); img.removeAttribute('src'); return; }
-        img.src = srcs[i++];
-    };
-    img.addEventListener('error', next);
-    next(); // listener attached first, so a failed first src advances correctly
+    const url = c.thumbnail;
+    const miss = () => { img.classList.add('nh-cover-missing'); img.removeAttribute('src'); };
+    if (!url || !/^https?:\/\//.test(url)) { miss(); return; }
+    img.addEventListener('error', miss);
+    img.src = url;
 }
 
 // renderMatchBadges turns a candidate's scoring signals into compact "why-match"
