@@ -129,10 +129,10 @@ const maxCatalogPages = 10
 // review/none result is understood as "maybe a deeper match exists", not "definitely none".
 const truncatedNote = "artist catalog truncated at 10 pages — a deeper match may exist"
 
-// nhSearcher is the slice of a source.Provider the bulk sweep depends on, plus Slug so
-// the apply path can stamp which source a title's tags came from. The concrete provider
+// providerSearcher is the slice of a source.Provider the bulk sweep depends on, plus Slug
+// so the apply path can stamp which source a title's tags came from. The concrete provider
 // clients satisfy it; tests inject a counting fake.
-type nhSearcher interface {
+type providerSearcher interface {
 	Slug() string
 	Search(ctx context.Context, q source.SearchQuery) (*source.SearchResponse, error)
 	GalleryByID(ctx context.Context, id string) (*source.GalleryDetail, error)
@@ -155,7 +155,7 @@ type cachedSearch struct {
 // artistCount drives the catalog-vs-title-first choice: only an artist with >=2 local
 // titles is worth a full catalog page-through.
 type autoTagRun struct {
-	client      nhSearcher
+	client      providerSearcher
 	slug        string
 	langMode    string
 	artistCount map[string]int
@@ -165,7 +165,7 @@ type autoTagRun struct {
 }
 
 // newAutoTagRun builds a run with empty caches and a normalized language mode.
-func newAutoTagRun(client nhSearcher, langMode string, artistCount map[string]int) *autoTagRun {
+func newAutoTagRun(client providerSearcher, langMode string, artistCount map[string]int) *autoTagRun {
 	if artistCount == nil {
 		artistCount = map[string]int{}
 	}
@@ -653,19 +653,34 @@ func (a *App) matchThroughChain(ctx context.Context, chain *sourceChain, mi matc
 }
 
 // confidentMatch reports whether some scored candidate is safe enough to stop searching:
-// pages within tolerance and a full-enough title (autotag's auto-apply bar) AND — when
-// the local artist is known — the candidate is by that artist (the ArtistMatch the scorer
-// already resolved). That artist guard is what lets the title-only search run first
-// without a same-titled work by a different artist ending the search before the
-// artist-narrowed query gets its turn. Note it keeps the page gate even though Decide no
-// longer requires it: a loose page match shouldn't end the search prematurely.
+// a full-enough title (autotag's auto-apply bar) plus a page/artist signal strong enough
+// that continuing can't do better.
+//
+// When the candidate reports a page count it must be close: a loose page match shouldn't
+// end the search on a plausible-but-wrong title, and — when the local artist is known —
+// the candidate must also be by that artist (the ArtistMatch the scorer resolved), so a
+// same-titled work by a *different* artist can't end the search before the artist-narrowed
+// query gets its turn.
+//
+// When the candidate reports NO page count (a provider like MangaDex that indexes
+// chapters, not a single count), that page gate can never fire, so the artist tag stands
+// in for it: an artist-confirmed strong title is safe to stop on. A confirmed artist is
+// required in that case — a strong title alone, with neither a page count nor an artist to
+// corroborate it, is too weak to end the search early (see roadmap 2.3).
 func confidentMatch(cands []autotag.Candidate, localArtist string) bool {
 	for i := range cands {
 		c := cands[i]
-		if !c.PagesClose || c.TitleScore < strongTitleScore {
+		if c.TitleScore < strongTitleScore {
 			continue
 		}
-		if localArtist == "" || c.ArtistMatch {
+		if c.Gallery.NumPages > 0 {
+			if c.PagesClose && (localArtist == "" || c.ArtistMatch) {
+				return true
+			}
+			continue
+		}
+		// No page count: only an artist-confirmed title ends the search early.
+		if localArtist != "" && c.ArtistMatch {
 			return true
 		}
 	}
@@ -685,30 +700,27 @@ func candidateArtistMatches(r source.SearchResult, localArtist string) bool {
 // errNoAPIKey is surfaced to the UI when no key is configured.
 var errNoAPIKey = errors.New("no nhentai API key set — add one in Settings")
 
-// Settings is the safe, maskable view of API-related config. No key is ever returned —
-// only whether one is set. ActiveSource/Label/Ready describe the currently-selected
-// metadata source so the UI can gate the fetch/sweep features and label them per source
-// (not just "nhentai"). HasNhentaiKey/NhentaiUserAgent are kept for the legacy key input.
+// Settings describes the currently-selected metadata source so the UI can gate the
+// fetch/sweep features and label them per source (not just "nhentai"): which source is
+// active, its human label, and whether it can actually build a client. Per-source
+// credential state (has-a-key, User-Agent) now rides on SourceState via GetSources — the
+// UI reads it from there, so the legacy has_nhentai_key/nhentai_user_agent fields that
+// used to live here are gone (the config-level legacy synth stays for old config files).
 type Settings struct {
-	HasNhentaiKey     bool   `json:"has_nhentai_key"`
-	NhentaiUserAgent  string `json:"nhentai_user_agent"`
 	ActiveSource      string `json:"active_source"`
 	ActiveSourceLabel string `json:"active_source_label"`
 	ActiveSourceReady bool   `json:"active_source_ready"`
 }
 
-// GetSettings reports the configured-source state without revealing any key: the legacy
-// nhentai key presence + User-Agent, plus which source is active, its human label, and
-// whether it can actually build a client (nhentai needs a key; MangaDex is always ready).
+// GetSettings reports the active-source state: which source is active, its human label,
+// and whether it can actually build a client (nhentai needs a key; MangaDex is always
+// ready). Per-source key presence + User-Agent are reported by GetSources instead.
 func (a *App) GetSettings() (Settings, error) {
 	cfg, err := config.Load(a.dataDir)
 	if err != nil {
 		return Settings{}, err
 	}
-	s := Settings{
-		HasNhentaiKey:    strings.TrimSpace(cfg.NhentaiAPIKey) != "",
-		NhentaiUserAgent: cfg.NhentaiUserAgent,
-	}
+	s := Settings{}
 	if sc, ok := cfg.ActiveSourceConfig(); ok {
 		s.ActiveSource = sc.Provider
 		for _, p := range providerPresets {
@@ -734,8 +746,9 @@ func (a *App) SetNhentaiKey(key string) error {
 	return config.Save(cfg, a.dataDir)
 }
 
-// SourceCandidate is one ranked match shown to the UI. MediaID/Thumbnail build the cover
-// image; GalleryURL opens the gallery in the browser. Language/LangMatch and
+// SourceCandidate is one ranked match shown to the UI. Thumbnail is the absolute cover
+// URL the provider built (MediaID is the gallery's media id, kept as identifying data);
+// GalleryURL opens the gallery in the browser. Language/LangMatch and
 // ArtistMatch/ParodyMatch drive the why-match badges. Tags is populated only for
 // detail-fetched candidates (the merge set or the top few); it is nil otherwise to
 // avoid a detail fetch per candidate. GalleryID is the provider's string id.
@@ -905,6 +918,11 @@ func (a *App) MatchSource(id int64) (*MatchResult, error) {
 		}
 		if d, derr := cRun.detail(a.ctx, res.Candidates[i].GalleryID); derr == nil {
 			res.Candidates[i].Tags = galleryTypedTags(d)
+			// A searched candidate already carries a cover; a provider that searches
+			// without one still gets it from the detail fetch here.
+			if res.Candidates[i].Thumbnail == "" && d.Thumbnail != "" {
+				res.Candidates[i].Thumbnail = d.Thumbnail
+			}
 			markOverlap(&res.Candidates[i], mi.artist, mi.parodies, d)
 		}
 	}
@@ -1097,6 +1115,7 @@ func galleryIDCandidate(d *source.GalleryDetail, localPages int, mi matchInput) 
 	c := SourceCandidate{
 		GalleryID:     d.ID,
 		MediaID:       d.MediaID,
+		Thumbnail:     d.Thumbnail,
 		GalleryURL:    d.GalleryURL,
 		EnglishTitle:  d.EnglishTitle,
 		JapaneseTitle: d.JapaneseTitle,

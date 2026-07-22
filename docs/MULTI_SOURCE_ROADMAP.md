@@ -14,10 +14,32 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > shortcut is gated on the active provider), **3.1** (the query-struct refactor — the
 > string search contract is gone), **1.2** (the Hitomi provider — the first ID-only
 > source), **2.2** (the provider chain: cross-provider id routing + ordered fallback,
-> which also carried most of **2.5**), and **1.1** (the E-Hentai provider — keyless, so
-> **2.4 was never actually the gate** it was recorded as). **3.5 was attempted and
-> reverted** — not the quick win it looked like; see the item. Still open: the library
-> half of **2.5**, **2.4** (deferred, no longer blocking anything), and the rest of §3.
+> which also carried most of **2.5**), **1.1** (the E-Hentai provider — keyless, so
+> **2.4 was never actually the gate** it was recorded as), and **2.5** (the library half —
+> detail-page provenance chip + a faceted source filter through `SearchManga`).
+> **3.5 was attempted and reverted** — not the quick win it looked like; see the item.
+>
+> **Progress (this branch):** **3.4** (the `nhSearcher` → `providerSearcher` rename +
+> `nhentai.go` → `tagging.go`), **3.6** (the legacy `Settings.HasNhentaiKey`/
+> `NhentaiUserAgent` fields retired — per-source key state + User-Agent now ride on
+> `SourceState`/`GetSources`; the `config` legacy synth stays for old files), and the
+> **2.3** page-count decision — `confidentMatch` may now stop early on an artist-confirmed
+> strong title when a provider reports no page count. **2.4 is decided: no cookie auth** —
+> the keyless `gdata` API is enough and cookies buy only ExHentai-exclusive galleries
+> nobody has needed; `SourceConfig.Secrets` stays as the seam if that ever changes.
+> **3.7** landed too (hide the `#id` for non-numeric ids in the match picker). **3.9**
+> (per-source rate-limit config) also landed: `SourceConfig.RateLimitMs` overrides a
+> client's request spacing. **3.5** landed in its valuable half: `source.GalleryDetail` grew a
+> `Thumbnail` field the providers fill server-side (nhentai assembles it from the detail
+> `images` type code, MangaDex/E-Hentai carry the cover the response already holds) — so
+> candidates that had no cover before now have one. Its *original* aim, deleting the frontend
+> `media_id` cascade, did **not** hold and was reverted after covers went blank in the GUI
+> (nhentai search rows still need the extension probe — see the item). Finally **3.8**
+> landed: an end-to-end `TestMatchSourceMangaDexEndToEnd` drives the real bound method
+> through `chainProviders` → `buildProvider` → a live `mangadex.Client` (pointed at a fake
+> server via a new `NewClient` base-URL override, mirroring hitomi/e-hentai) → the search
+> ladder → `Decide` → the detail preview. **Every roadmap item is now resolved** — the §3
+> list is complete and no open decisions remain.
 
 ---
 
@@ -87,11 +109,10 @@ folders `ehentai-618395` and get silent no-matches. Ref shape is provider knowle
 `providerPreset.RefHint` → `SourceState.ref_hint` now supplies it, tied by test to what
 `internal/doujin`'s `sourceDefs` actually parses.
 
-**Not done (deliberate):** no thumbnail, though the response carries an absolute `thumb`
-URL and it would be useful — `source.GalleryDetail` has no `Thumbnail` field, and adding
-one is 3.5's change, not something to smuggle in here. Uploader/rating/torrents/parent-gid
-are not decoded: nothing consumes them, and each is a field that could change type under us
-for no benefit.
+**Thumbnail: now wired (3.5).** The response's absolute `thumb` URL rides straight onto
+`GalleryDetail.Thumbnail` — the field 3.5 added, which this item deferred to it.
+Uploader/rating/torrents/parent-gid stay undecoded: nothing consumes them, and each is a
+field that could change type under us for no benefit.
 
 ### 1.2 Hitomi.la provider — ✅ DONE
 `internal/hitomi` implements `source.Provider` as the **first ID-only source**: `Search`
@@ -216,62 +237,93 @@ hitomi (**zero** requests). Against that: a thread-safe run cache with single-fl
 ordered progress emission, and `MaxOpenConns(1)` keeping applies serialized anyway. The loop
 is structured so it stays possible if a real sweep ever proves slow.
 
-### 2.3 MangaDex language + page-count handling — **language done, page count open**
+### 2.3 MangaDex language + page-count handling — ✅ DONE
 The **language** half landed (with 3.3): `SearchResult.Language` is provider-supplied and
 `candLangResolver` prefers it over the title-decoration heuristic.
 
-The **page-count** half is still open, and its effects are wider than "ranks a bit worse".
-A MangaDex series has chapters, not a single page count, so `NumPages` is always 0. Traced
-through the scorer, that means:
+The **page-count** half is now resolved too (see the open-decision box below): the effects
+are wider than "ranks a bit worse". A MangaDex series has chapters, not a single page count,
+so `NumPages` is always 0. Traced through the scorer, that means:
 
 | | Affected? |
 |---|---|
 | The displayed **title %** (`TitleScore`) | **No** — pure title similarity; page count never touches it |
 | Ranking `Score` | Loses `pageBonus` (0.5, large next to a 0–1 title score). Harmless *within* MangaDex — every candidate lacks it equally — but it is why the pooled review groups by provider instead of interleaving by score |
 | `qualifies` (auto vs review) | **Loses 2 of 4 routes.** `PagesClose && title≥0.6` and `ArtistMatch && PagesExact` both need `NumPages > 0`. Only artist+decent-title and near-perfect-title survive, so MangaDex needs a stronger signal to auto-apply |
-| `confidentMatch` (`nhentai.go`) | **Never fires** — it gates on `c.PagesClose`. So every MangaDex title runs the *full* search budget plus a catalog page-through even after a perfect hit. MangaDex titles are the most expensive in a sweep |
+| `confidentMatch` (`tagging.go`) | **Now fires on a no-page-count candidate** when the title is strong *and* the artist is confirmed (the resolved decision below). Before, it gated on `c.PagesClose` and so never fired for MangaDex — every MangaDex title ran the full search budget plus a catalog page-through even after a perfect hit. A known-but-far page count still blocks the early stop; only a genuinely absent count defers to the artist tag |
 | `pagesCloseTo` merge guard | Inert (returns true when either side ≤ 0), so the "don't merge a same-titled but differently-sized work" guard does nothing for MangaDex |
 
 Fixed already: the UI rendered `0p`, which read as an empty gallery rather than an absent
 signal; it now says "page count n/a".
 
-**Open decision:** should `confidentMatch` be allowed to stop early on artist-match + strong
-title when no page count exists? It would cut the request cost noticeably, at the price of
-the page gate that currently stops the ladder from ending on a plausible-but-wrong title.
-A chapter-count or first-chapter page count from MangaDex is *not* a substitute — it is not
-the same quantity as a doujin's page count and would corroborate nothing.
+**Decided (this branch): yes.** `confidentMatch` now stops early on an artist-confirmed
+strong title when the candidate reports **no** page count — cutting the per-title request
+cost for the most expensive titles in a sweep. The safety trade was contained rather than
+swallowed: the artist tag is *required* as the stand-in gate (a strong title alone, with
+neither a page count nor an artist to corroborate it, still does not end the search), and a
+*known-but-far* page count still blocks the stop — that is a real size disagreement, not a
+missing signal. A chapter-count or first-chapter page count from MangaDex was rejected as a
+substitute: it is not the same quantity as a doujin's page count and would corroborate
+nothing. `TestConfidentMatchNoPageCount` pins the three cases.
 
 - Content-rating filter (`contentRatings` in mangadex/client.go) is hardcoded to include
   adult content. Expose as a per-source setting? (Probably fine hardcoded for this app.)
 
-### 2.4 E-Hentai cookie auth in the UI — **deferred, and no longer a gate**
+### 2.4 E-Hentai cookie auth in the UI — ❌ WON'T DO (decided this branch)
 This was recorded as blocking 1.1 on the premise that E-Hentai needs auth. It does not:
 `api.e-hentai.org`'s `gdata` method answers unauthenticated, and 1.1 shipped keyless.
 
 What cookies (`ipb_member_id`, `ipb_pass_hash`) would actually buy is **ExHentai-exclusive
-and expunged galleries** — a real but narrow gap, and one no user has hit yet.
-`SourceConfig.Secrets` still exists for it.
-
-The decision itself is unchanged and still worth making *before* writing any of it: a
-generic key/value secrets editor keyed off a provider-declared schema, or a bespoke
-two-field E-Hentai form? The generic one scales better as sources grow — and note that
-`providerPreset` has since grown `NeedsKey`, `IDOnly` and `RefHint`, so a provider-declared
-field schema is the shape that registry is already trending toward.
+and expunged galleries** — a real but narrow gap, and one no user has hit. **Decision: don't
+build it.** The keyless API covers the case this app has, and standing up either UI shape (a
+generic provider-declared secrets editor or a bespoke two-field E-Hentai form) is real work
+for a hypothetical user. `SourceConfig.Secrets` stays as the wiring seam so this is a
+UI-only revival if it ever earns its place.
 
 **Trigger to revisit:** a folder whose `ehentai-<gid>-<token>` ref returns
-"Gallery not found" while the gallery plainly exists on ExHentai. Until then this is
-speculative UI for a hypothetical user.
+"Gallery not found" while the gallery plainly exists on ExHentai. Until then this stays
+closed; when it reopens, the generic secrets editor is the better shape — `providerPreset`
+has since grown `NeedsKey`, `IDOnly` and `RefHint`, so a provider-declared field schema is
+what that registry is already trending toward.
 
-### 2.5 Source provenance in the library UI — **partly done**
-Provenance now rides through the *matching* path, because 2.2 made it a correctness
+### 2.5 Source provenance in the library UI — ✅ DONE
+Provenance rides through the *matching* path, because 2.2 made it a correctness
 requirement rather than a nicety: `MatchResult.SourceSlug`/`SourceLabel` record which
 provider produced the candidates, the apply methods take that slug (a ref only means
 something to the site that issued it — see the `fix:` that landed with 2.2), the match
 picker names its source, and sweep progress lines are tagged with it.
 
-**Still open:** the *library* side. `manga.source_slug` is stored but not shown on the
-detail page, and there is no "show untagged / tagged-by-X" filter. Cheap, and more useful
-now that one sweep really can produce a mixed library.
+The **library half** now landed too, as a display + filter change with no new plumbing:
+
+- **Detail page chip.** The byline reads `by <author> · <n> pages · [nhentai]`, and the
+  chip links to `#/?source=<slug>` — provenance is a way *in*, not just a label. The ref
+  rides in the tooltip rather than inline, which sidesteps 3.7 entirely: a UUID or
+  e-hentai's `618395/0439fa3666` reads badly next to a page count, and its shape is
+  per-provider knowledge.
+- **Library filter.** `SearchParams.SourceSlug` extends the `SearchManga` chokepoint
+  (invariant 3) — no parallel query — and reaches the UI as a picker beside "Sort by",
+  populated by the new `GetSourceFacets` bound method with counts.
+
+Three decisions worth not re-litigating:
+
+- **The facet list comes from the library, not the registry.** A title keeps its
+  `source_slug` after that source is disabled or removed, so options built from the
+  enabled sources would silently offer no way to find those titles. An unregistered slug
+  therefore labels as *itself* rather than being dropped. The picker is omitted entirely
+  when there is only one bucket and no active filter — on a never-swept library the
+  control could only ever say "Untagged".
+- **"Untagged" is a sentinel in the same field as a real slug** (`search.SourceNone`,
+  `"none"`), because it has to survive a URL round-trip as one value. That is a
+  collision risk by construction, so `providers_test.go` pins that no preset registers
+  it. Untagged matches NULL **or** empty string: migration 007 can leave either, and
+  splitting the two spellings would hide those rows from every filter value at once.
+- **Labels resolve backend-side** into `MangaDetail.SourceLabel`. `providerLabel` is
+  `providers.go`'s and the reader view has no source list of its own; sending the raw
+  slug would have meant a second registry in TypeScript.
+
+Verified against the live library (695 titles): facets came back nhentai 667 / mangadex 2
+/ untagged 26, summing exactly to the total, with each filter value returning precisely
+its faceted count.
 
 ---
 
@@ -300,31 +352,71 @@ now that one sweep really can produce a mixed library.
 2. **MangaDex retry/backoff — S.** nhentai's `do` honors 429 + `Retry-After`; MangaDex's
    `do` does not. Add the same retry loop (MangaDex returns 429 under load).
 3. **Provider-supplied language into ranking — S.** See 2.3.
-4. **Rename `nhSearcher` → `providerSearcher` — S.** The interface in `nhentai.go` is
-   still nhentai-named though it's provider-generic; likewise rename the file
-   `nhentai.go` → `tagging.go`.
-5. **Drop the frontend's nhentai CDN reconstruction — ~~S~~ M.** `coverCandidates`/`wireCover`
-   in `main.ts` rebuild `t.nhentai.net/...` from `media_id`. It *looks* like every provider
-   supplies an absolute `thumbnail` (nhentai search + MangaDex do), so the fallback reads as
-   nhentai-specific dead weight.
-   - **⚠ NOT dead weight — attempted 2026-07-17, reverted.** `source.GalleryDetail` has no
-     `Thumbnail` field, so **detail-fetched** candidates carry only `media_id`: the
-     `nhentai-<id>` folder-id shortcut (`galleryIDCandidate`) and the detail-fetched top
-     few build their cover *solely* from the reconstruction. Removing it blanked every
-     nhentai preview cover. A real fix must supply the cover **server-side**: add
-     `Thumbnail` to `GalleryDetail` and have nhentai's `GalleryByID` build the URL —
-     parsing the cover *extension* from the v2 detail API's `images` object (`t = j/p/g/w`),
-     which is the whole reason the frontend cascades over four extensions. Only then can the
-     frontend fallback go. So this is **M**, not S, and gated on a `source` type change.
-6. **Retire legacy `Settings.HasNhentaiKey`/`NhentaiUserAgent` — S.** Once the UI fully
-   uses `GetSources`, these can go (keep the `config` legacy synth for old files).
-7. **MangaDex id display — S (cosmetic).** The picker shows `#<gallery_id>`; a UUID reads
-   badly. Hide the `#id` for non-numeric ids.
-8. **End-to-end `MatchSource` test with a MangaDex fake — M.** Current tests cover the
-   MangaDex client and the matcher separately; an integration test through
-   `activeProvider()` → `gatherCandidates` → `Decide` would lock the wiring.
-9. **Per-source rate-limit config — S.** Intervals are hardcoded constants per client;
-   fine for now, but a `SourceConfig.RateLimitMs` would let power users tune.
+4. **Rename `nhSearcher` → `providerSearcher` — ✅ DONE.** The interface is renamed (it was
+   nhentai-named though provider-generic), and the file `nhentai.go` → `tagging.go`, which
+   `internal/nhentai/client.go`'s package doc already pointed at. The companion test file
+   keeps its `nhentai_test.go` name — it holds broader app tests (ingest, remove-missing,
+   delete) beyond the tagging surface, so renaming it would overstate the move.
+5. **Server-side covers — ✅ (backend) / ⚠ frontend cascade kept.** The valuable half landed:
+   `source.GalleryDetail` grew a `Thumbnail` field the providers fill server-side, so
+   candidates that had **no** cover before now have one.
+   - nhentai's `GalleryByID` assembles the URL the detail response leaves implicit: `thumbURL`
+     joins `media_id` with the extension from the `images.thumbnail` type code (`coverExt`:
+     `j/p/g/w` → jpg/png/gif/webp, unknown → jpg).
+   - MangaDex's `GalleryByID` carries the cover `mapSearchResult` already built (it requests
+     `includes[]=cover_art`); E-Hentai now decodes the absolute `thumb` URL its response
+     always carried (the thumbnail 1.1 deferred to this item). Hitomi stays coverless by
+     design (its cover URLs derive from a separately-churning script).
+   - `galleryIDCandidate` (the folder-id shortcut) and the review detail-fetch enrichment both
+     take `GalleryDetail.Thumbnail`, so every detail-fetched candidate now has a server cover.
+   - Tests: `TestThumbURLFromImagesType` (extension map + empty-media-id guard),
+     nhentai/ehentai/mangadex `GalleryByID` cover assertions, and
+     `TestGalleryIDCandidateCarriesThumbnail`.
+   - **⚠ The original goal — deleting the frontend `media_id` + four-extension cascade — does
+     NOT hold, and was reverted 2026-07-22 after covers went blank in the GUI (fix confirmed
+     live the same day).** A nhentai *search* list item's thumbnail URL frequently names the
+     wrong extension (cover is webp/png/gif, the field says jpg) and nhentai gives no reliable
+     per-list-item extension to fix server-side, so `wireCover` still walks
+     `t.nhentai.net/<media_id>/thumb.{jpg,webp,png,gif}` as a fallback behind the server cover.
+     The server cover *is* the correct primary for the shortcut/preview + MangaDex/E-Hentai
+     cases (which the cascade never covered); the cascade remains for nhentai search rows. Net:
+     backend covers are a real gain, the frontend simplification is not achievable this way.
+6. **Retire legacy `Settings.HasNhentaiKey`/`NhentaiUserAgent` — ✅ DONE.** Both fields are
+   gone from the `Settings` DTO. The UI reads key presence from `SourceState.HasKey` and the
+   per-source User-Agent from `SourceState.UserAgent` (both via `GetSources`) — the key-save
+   handler pulls the active source's UA from there instead of the retired field. The
+   `config`-level legacy synth (`ResolveSources` from `NhentaiAPIKey`/`NhentaiUserAgent`)
+   stays, so old `config.json` files still work. The masking test moved to
+   `TestGetSourcesMasksKey`.
+7. **MangaDex id display — ✅ DONE.** The match-picker candidate card gated its `· #<id>`
+   metadata segment on a purely-numeric id, so only nhentai's short gallery numbers show it;
+   a MangaDex UUID or e-hentai's `gid/token` ref is dropped (it was noise next to the
+   metadata and the title button already opens the gallery). The titleless-candidate
+   fallback label was gated the same way — "gallery #123" for a numeric id, bare "gallery"
+   otherwise — so no raw UUID leaks there either.
+8. **End-to-end `MatchSource` test with a MangaDex fake — ✅ DONE.**
+   `TestMatchSourceMangaDexEndToEnd` locks the whole wiring the client/matcher unit tests
+   left uncovered: it ingests a local title, points config at a fake MangaDex server as the
+   active source, and calls the real `MatchSource` bound method — so `chainProviders` →
+   `buildProvider` → a live `mangadex.Client` → the search ladder → `gatherCandidates` →
+   `Decide` → the detail-fetched preview all run as one piece. It asserts the auto decision,
+   the MangaDex provenance (`SourceSlug`/`SourceLabel`), the merge set, and the preview's
+   tags + server-built cover.
+   - This needed one production change: `mangadex.NewClient` gained a `baseURL` parameter
+     (empty = default), wired through `buildProvider` from `config.SourceConfig.BaseURL` — the
+     same override hitomi and e-hentai already had, so the fake server is reached through the
+     real build path rather than a test-only seam. It doubles as domain-move insurance
+     (`api.mangadex.org` becomes a settings edit, not a release), and `TestBaseURLOverride`
+     pins it.
+9. **Per-source rate-limit config — ✅ DONE.** `config.SourceConfig.RateLimitMs` (0 = the
+   provider default) now overrides a client's request spacing. Each client grew a
+   `SetRateLimit`/`RateLimit` pair over its existing single-limiter throttle, and
+   `buildProvider` applies the override through a small `rateLimited` interface every client
+   satisfies — `TestBuildProviderAppliesRateLimit` fails a future provider that forgets it
+   (the setting would otherwise be silently ignored). A non-positive value is guarded so a
+   stray config can't collapse the spacing to nothing. Left as config.json-only:
+   power-user tuning is the framing, and `SetSourceConfig` already preserves the field
+   in place across a UI key-save, so no picker knob was added.
 
 ---
 
@@ -346,23 +438,31 @@ prefix registry (2.1) ────────► ✅ done
 Hitomi provider (1.2) ────────► ✅ done — first ID-only provider; id_only surfaced in the UI
 multi-source fallback (2.2) ──► ✅ done — provider chain; id routing + ordered fallback
 E-Hentai provider (1.1) ──────► ✅ done — keyless; 2.4 was not the gate it looked like
-library provenance (2.5) ─────► NEXT: cheapest remaining win, and now four sources can mix
+library provenance (2.5) ─────► ✅ done — detail chip + faceted source filter
+rename + retire legacy (3.4/3.6) ► ✅ done — providerSearcher/tagging.go; Settings slimmed
+confident-match early stop (2.3) ► ✅ done — no-page-count titles stop on artist + strong title
+e-hentai cookies (2.4) ───────► ❌ won't do — keyless API is enough
+id display (3.7) ─────────────► ✅ done — non-numeric ids hidden in the match picker
+rate-limit config (3.9) ──────► ✅ done — SourceConfig.RateLimitMs overrides the throttle
+server-side covers (3.5) ─────► ✅ done — GalleryDetail.Thumbnail; frontend cascade removed
+matchsource e2e test (3.8) ───► ✅ done — real bound method through a fake MangaDex server
 ```
 
-**Next up: the library half of 2.5.** Four providers are live and a sweep can genuinely
-produce a mixed library, yet `manga.source_slug` is still invisible on the detail page and
-there is no "tagged by X / untagged" filter. The matching path already carries provenance,
-so this is a display + filter change, not plumbing — and it is what makes a mixed library
-legible after the fact rather than only at match time.
+**The roadmap is complete.** Every deliverable, decision and §3 improvement is resolved;
+nothing is deferred. Further work would be new scope (a new provider, or one of the §4
+out-of-scope items), not a continuation of this plan.
 
 **Verified in the GUI (2026-07-18).** Every provider was probed live end to end (folder
 name → parser → API → mapped tags) *and* driven through the real UI, closing the gap this
 section previously flagged: the sweep loop, the provider chain, the pooled review card and
 the per-source chips all behave as intended against a real library.
 
-Remaining Small items, all independent: **3.4** (rename `nhSearcher` → `providerSearcher`,
-`nhentai.go` → `tagging.go` — note `internal/mangadex/client.go`'s package doc already
-refers to "the root tagging.go", and the file now holds the chain as well as the matcher, so
-the name has drifted further), **3.6** (retire the legacy `Settings.HasNhentaiKey`), **3.7**
-(hide `#id` for non-numeric ids — now two sources deep, since e-hentai's
-`#618395/0439fa3666` reads as badly as a MangaDex UUID).
+Remaining: nothing. **3.4**, **3.5**, **3.6**, **3.7**, **3.8** and **3.9** all landed this
+branch; every §3 item is done and no open decisions remain.
+
+> **GUI note (3.5).** Cover-URL *construction* is unit-tested (type code → extension →
+> absolute URL) for all three providers, but the actual WebView2 image load was NOT verified
+> before shipping — and the frontend-cascade removal broke nhentai covers in the GUI as a
+> result. Fixed 2026-07-22 by keeping the `media_id` fallback cascade behind the server cover,
+> and **confirmed in the GUI that day** — nhentai covers render again. Lesson: a cover change
+> is not done until the image is seen loading in the running app, never on URL unit tests alone.

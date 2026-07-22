@@ -6,6 +6,7 @@ export namespace config {
 	    user_agent: string;
 	    base_url?: string;
 	    secrets?: Record<string, string>;
+	    rate_limit_ms?: number;
 	    enabled: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -19,6 +20,7 @@ export namespace config {
 	        this.user_agent = source["user_agent"];
 	        this.base_url = source["base_url"];
 	        this.secrets = source["secrets"];
+	        this.rate_limit_ms = source["rate_limit_ms"];
 	        this.enabled = source["enabled"];
 	    }
 	}
@@ -87,6 +89,7 @@ export namespace main {
 	    manga: search.Manga;
 	    pages: string[];
 	    tags: tag.Typed[];
+	    source_label: string;
 	    missing: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -98,6 +101,7 @@ export namespace main {
 	        this.manga = this.convertValues(source["manga"], search.Manga);
 	        this.pages = source["pages"];
 	        this.tags = this.convertValues(source["tags"], tag.Typed);
+	        this.source_label = source["source_label"];
 	        this.missing = source["missing"];
 	    }
 	
@@ -242,9 +246,10 @@ export namespace main {
 		}
 	}
 	export class SearchArgs {
-	    q: string;
-	    author_id: number;
+	    q: string[];
+	    author_ids: number[];
 	    tags: string[];
+	    source: string;
 	    sort: string;
 	    seed: number;
 	    limit: number;
@@ -257,8 +262,9 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.q = source["q"];
-	        this.author_id = source["author_id"];
+	        this.author_ids = source["author_ids"];
 	        this.tags = source["tags"];
+	        this.source = source["source"];
 	        this.sort = source["sort"];
 	        this.seed = source["seed"];
 	        this.limit = source["limit"];
@@ -266,8 +272,6 @@ export namespace main {
 	    }
 	}
 	export class Settings {
-	    has_nhentai_key: boolean;
-	    nhentai_user_agent: string;
 	    active_source: string;
 	    active_source_label: string;
 	    active_source_ready: boolean;
@@ -278,14 +282,28 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.has_nhentai_key = source["has_nhentai_key"];
-	        this.nhentai_user_agent = source["nhentai_user_agent"];
 	        this.active_source = source["active_source"];
 	        this.active_source_label = source["active_source_label"];
 	        this.active_source_ready = source["active_source_ready"];
 	    }
 	}
 	
+	export class SourceFacet {
+	    slug: string;
+	    label: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SourceFacet(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.slug = source["slug"];
+	        this.label = source["label"];
+	        this.count = source["count"];
+	    }
+	}
 	export class SourceState {
 	    slug: string;
 	    label: string;
@@ -412,6 +430,24 @@ export namespace search {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
+	    }
+	}
+	export class FilterOption {
+	    value: string;
+	    label: string;
+	    subject: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new FilterOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.value = source["value"];
+	        this.label = source["label"];
+	        this.subject = source["subject"];
+	        this.count = source["count"];
 	    }
 	}
 	export class Manga {

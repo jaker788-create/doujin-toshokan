@@ -302,6 +302,25 @@ func TestToCandidatePopulatesCoverLangAndURL(t *testing.T) {
 	}
 }
 
+// The folder-id shortcut candidate is built from a detail, not a search list item, so its
+// cover comes from GalleryDetail.Thumbnail. Before roadmap 3.5 that field did not exist and
+// the shortcut relied on the frontend rebuilding a CDN path from media_id; the cover URL now
+// rides through server-side.
+func TestGalleryIDCandidateCarriesThumbnail(t *testing.T) {
+	d := &source.GalleryDetail{
+		ID:           "271687",
+		MediaID:      "999",
+		Thumbnail:    "https://t.nhentai.net/galleries/999/thumb.png",
+		GalleryURL:   "https://nhentai.net/g/271687/",
+		EnglishTitle: "X",
+		NumPages:     30,
+	}
+	c := galleryIDCandidate(d, 30, matchInputs("", "X", ""))
+	if c.Thumbnail != d.Thumbnail {
+		t.Errorf("Thumbnail = %q, want %q", c.Thumbnail, d.Thumbnail)
+	}
+}
+
 func TestShortlistFlagsArtistAndParodyOverlap(t *testing.T) {
 	mi := matchInputs("/lib/[Group (Sanada)] T (Kemono Jihen) [English]", "T", "")
 	ranked := []autotag.Candidate{
@@ -420,6 +439,30 @@ func TestConfidentMatchRequiresArtistWhenKnown(t *testing.T) {
 	}
 	if !confidentMatch(score(wrong), "") {
 		t.Error("with no known local artist, a full title + close pages should suffice")
+	}
+}
+
+// A provider that reports no page count (MangaDex indexes chapters, not pages) can never
+// clear the page gate, so an artist-confirmed strong title stops the search on its own —
+// but a strong title with no page count AND no artist to corroborate it stays too weak to
+// end the search early (roadmap 2.3).
+func TestConfidentMatchNoPageCount(t *testing.T) {
+	score := func(r source.SearchResult, artist string) []autotag.Candidate {
+		am := func(x source.SearchResult) bool { return candidateArtistMatches(x, artist) }
+		return autotag.ScoreAll([]string{"A Little Sister's Warmth"}, 19, "", []source.SearchResult{r}, nil, am)
+	}
+	// NumPages 0 = no page signal at all, the way every MangaDex series reports.
+	byArtist := source.SearchResult{ID: "1", EnglishTitle: "[Some Artist] A Little Sister's Warmth", NumPages: 0}
+	noArtist := source.SearchResult{ID: "2", EnglishTitle: "A Little Sister's Warmth", NumPages: 0}
+
+	if !confidentMatch(score(byArtist, "some artist"), "some artist") {
+		t.Error("no page count + artist match + strong title should stop the search early")
+	}
+	if confidentMatch(score(noArtist, "some artist"), "some artist") {
+		t.Error("no page count + no artist match must not stop the search early")
+	}
+	if confidentMatch(score(noArtist, ""), "") {
+		t.Error("no page count + no known artist must not stop the search early on title alone")
 	}
 }
 
@@ -550,7 +593,7 @@ func TestGatherArtistCatalogFallsBackToAllLanguages(t *testing.T) {
 
 // ── Run cache, pagination, and language narrowing ──────────────────────────
 
-// countingSearcher is an nhSearcher fake: it records every Search query+page and every
+// countingSearcher is a providerSearcher fake: it records every Search query+page and every
 // GalleryByID id, and serves canned responses. numPages is the num_pages reported on every
 // search; perPage ids are generated per page (id = page*1000 + index) so the page-through
 // and dedup paths are exercised.
@@ -1056,29 +1099,39 @@ func TestDeleteMangaCascadesTagsAndPrunesAuthor(t *testing.T) {
 	}
 }
 
-func TestGetSettingsMasksKey(t *testing.T) {
+// GetSources reports whether a source has a key set, without ever returning the key value.
+// (This masking used to be Settings.HasNhentaiKey; it moved to SourceState.HasKey when the
+// UI switched to GetSources — see roadmap 3.6. The guarantee moved with it.)
+func TestGetSourcesMasksKey(t *testing.T) {
 	a := newTestApp(t)
 
-	s, err := a.GetSettings()
-	if err != nil {
-		t.Fatal(err)
+	nhState := func() SourceState {
+		srcs, err := a.GetSources()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range srcs {
+			if s.Slug == "nhentai" {
+				return s
+			}
+		}
+		t.Fatal("nhentai source missing from GetSources")
+		return SourceState{}
 	}
-	if s.HasNhentaiKey {
-		t.Error("HasNhentaiKey = true before any key set")
+
+	if nhState().HasKey {
+		t.Error("has_key = true before any key set")
 	}
 
 	if err := a.SetNhentaiKey("  secret-key  "); err != nil {
 		t.Fatal(err)
 	}
-	s, err = a.GetSettings()
-	if err != nil {
-		t.Fatal(err)
+	s := nhState()
+	if !s.HasKey {
+		t.Error("has_key = false after setting a key")
 	}
-	if !s.HasNhentaiKey {
-		t.Error("HasNhentaiKey = false after setting a key")
-	}
-	// Settings must never carry the key value itself.
-	if got := reflect.ValueOf(s); got.FieldByName("NhentaiAPIKey").IsValid() {
-		t.Error("Settings exposes a key field; it must not")
+	// SourceState must never carry the key value itself.
+	if got := reflect.ValueOf(s); got.FieldByName("APIKey").IsValid() {
+		t.Error("SourceState exposes a key field; it must not")
 	}
 }

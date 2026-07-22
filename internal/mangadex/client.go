@@ -93,16 +93,43 @@ type Client struct {
 	authorIDs map[string]string
 }
 
-// NewClient returns a client sending the given descriptive User-Agent. MangaDex needs
-// no API key for reads.
-func NewClient(userAgent string) *Client {
+// NewClient returns a client sending the given descriptive User-Agent. baseURL overrides
+// the API endpoint — pass "" for the default. MangaDex needs no API key for reads. The
+// override mirrors hitomi/e-hentai: it makes an API-domain move recoverable from settings
+// (config.SourceConfig.BaseURL) rather than a release, and lets a test point the client at
+// a fake server through the real buildProvider path.
+func NewClient(userAgent, baseURL string) *Client {
+	base := strings.TrimSpace(baseURL)
+	if base == "" {
+		base = defaultBaseURL
+	}
 	return &Client{
 		userAgent: userAgent,
-		base:      defaultBaseURL,
+		base:      base,
 		interval:  defaultInterval,
 		http:      &http.Client{Timeout: requestTimeout},
 		authorIDs: map[string]string{},
 	}
+}
+
+// SetRateLimit overrides the minimum spacing between requests, replacing defaultInterval;
+// a non-positive duration is ignored. It backs config.SourceConfig.RateLimitMs, applied at
+// build time before first use. The default is tuned to the site's tolerance, so lowering it
+// risks a rate-limit ban.
+func (c *Client) SetRateLimit(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.interval = d
+	c.mu.Unlock()
+}
+
+// RateLimit reports the minimum spacing currently enforced between requests.
+func (c *Client) RateLimit() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.interval
 }
 
 // Slug and Label identify the provider (source.Provider).
@@ -289,8 +316,11 @@ func (c *Client) GalleryByID(ctx context.Context, id string) (*source.GalleryDet
 		JapaneseTitle: sr.JapaneseTitle,
 		PrettyTitle:   sr.EnglishTitle,
 		GalleryURL:    sr.GalleryURL,
-		NumPages:      sr.NumPages,
-		Tags:          sr.Tags,
+		// includes[]=cover_art is requested above, so the cover URL is already built
+		// (mapSearchResult) — carry it so a detail-fetched candidate shows a cover too.
+		Thumbnail: sr.Thumbnail,
+		NumPages:  sr.NumPages,
+		Tags:      sr.Tags,
 	}, nil
 }
 

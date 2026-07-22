@@ -115,13 +115,19 @@ func isUniqueViolation(err error) bool {
 // SearchArgs are the optional browse/filter parameters. Tags are tag NAMES; they
 // are resolved to ids here, mirroring the Python /api/search route.
 type SearchArgs struct {
-	Q        string   `json:"q"`
-	AuthorID int64    `json:"author_id"`
-	Tags     []string `json:"tags"`
-	Sort     string   `json:"sort"`
-	Seed     int64    `json:"seed"` // only used when Sort == "random"
-	Limit    int      `json:"limit"`
-	Offset   int      `json:"offset"`
+	// Q and AuthorIDs are plural because the filter builder stacks chips of the same
+	// kind. Q terms AND together (each narrows); author ids OR (a title has one author,
+	// so requiring two would match nothing).
+	Q         []string `json:"q"`
+	AuthorIDs []int64  `json:"author_ids"`
+	Tags      []string `json:"tags"`
+	// Source filters by tag provenance: "" for any, search.SourceNone ("none") for
+	// titles that were never auto-tagged, or a provider slug ("nhentai", "hitomi", …).
+	Source string `json:"source"`
+	Sort   string `json:"sort"`
+	Seed   int64  `json:"seed"` // only used when Sort == "random"
+	Limit  int    `json:"limit"`
+	Offset int    `json:"offset"`
 }
 
 // Search returns manga matching args. Unknown tag names yield no results (the AND
@@ -150,23 +156,60 @@ func (a *App) Search(args SearchArgs) ([]search.Manga, error) {
 		offset = 0
 	}
 	return search.SearchManga(a.db, search.SearchParams{
-		Query:    args.Q,
-		AuthorID: args.AuthorID,
-		TagIDs:   tagIDs,
-		Sort:     args.Sort,
-		Seed:     args.Seed,
-		Limit:    limit,
-		Offset:   offset,
+		Queries:    args.Q,
+		AuthorIDs:  args.AuthorIDs,
+		TagIDs:     tagIDs,
+		SourceSlug: args.Source,
+		Sort:       args.Sort,
+		Seed:       args.Seed,
+		Limit:      limit,
+		Offset:     offset,
 	})
+}
+
+// SourceFacet is one option of the library's source-provenance filter: a slug, its
+// human label, and how many titles carry it.
+type SourceFacet struct {
+	Slug  string `json:"slug"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+}
+
+// GetSourceFacets lists the metadata sources actually represented in the library,
+// with counts, for the library filter. The untagged bucket comes back as
+// search.SourceNone and sorts last.
+//
+// Labels are resolved through the provider registry, but an unregistered slug keeps
+// its own name rather than being dropped: a title tagged by a source that has since
+// been removed still has to be findable.
+func (a *App) GetSourceFacets() ([]SourceFacet, error) {
+	counts, err := search.SourceCounts(a.db)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SourceFacet, 0, len(counts))
+	for _, c := range counts {
+		label := providerLabel(c.Slug)
+		if c.Slug == search.SourceNone {
+			label = "Untagged"
+		}
+		out = append(out, SourceFacet{Slug: c.Slug, Label: label, Count: c.Count})
+	}
+	return out, nil
 }
 
 // MangaDetail is the title-page payload: the manga row, its on-disk page paths
 // (empty when the folder is missing), its tags, and whether the folder is missing.
 type MangaDetail struct {
-	Manga   search.Manga `json:"manga"`
-	Pages   []string     `json:"pages"`
-	Tags    []tag.Typed  `json:"tags"`
-	Missing bool         `json:"missing"`
+	Manga search.Manga `json:"manga"`
+	Pages []string     `json:"pages"`
+	Tags  []tag.Typed  `json:"tags"`
+	// SourceLabel is the human name of Manga.SourceSlug ("E-Hentai" for "ehentai"),
+	// empty when the title was never auto-tagged. It is resolved here rather than in
+	// the frontend because the slug→label registry is providers.go's, and a title can
+	// outlive the source that tagged it (an unregistered slug labels as itself).
+	SourceLabel string `json:"source_label"`
+	Missing     bool   `json:"missing"`
 }
 
 // GetManga returns the detail payload for one manga, or nil if the id is unknown.
@@ -188,7 +231,19 @@ func (a *App) GetManga(id int64) (*MangaDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &MangaDetail{Manga: *m, Pages: pages, Tags: tags, Missing: missing}, nil
+	label := ""
+	if m.SourceSlug != nil && *m.SourceSlug != "" {
+		label = providerLabel(*m.SourceSlug)
+	}
+	return &MangaDetail{Manga: *m, Pages: pages, Tags: tags, SourceLabel: label, Missing: missing}, nil
+}
+
+// FilterOptions lists everything the filter builder can filter by for one chip kind
+// ("tag", "author", "title"), most-used first, so clicking the field shows what the
+// library holds instead of requiring the user to guess a prefix. The full list is
+// returned and narrowed in the UI as they type.
+func (a *App) FilterOptions(kind string) ([]search.FilterOption, error) {
+	return search.ListFilterOptions(a.db, kind)
 }
 
 // SuggestTags returns tag-name completions for the filter builder.
@@ -200,11 +255,6 @@ func (a *App) SuggestTags(q string) ([]string, error) {
 // picking an existing tag can auto-fill its subject.
 func (a *App) SuggestTagsTyped(q string) ([]tag.Typed, error) {
 	return search.SuggestTagsTyped(a.db, q, 10)
-}
-
-// SuggestAuthors returns author {id,name} matches for the filter builder.
-func (a *App) SuggestAuthors(q string) ([]search.Author, error) {
-	return search.SuggestAuthors(a.db, q, 10)
 }
 
 // UpdateTags replaces a manga's tags and returns the saved set (with subjects,

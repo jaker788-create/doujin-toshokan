@@ -20,6 +20,10 @@ func main() {
 		Title:  "Doujin Toshokan",
 		Width:  1280,
 		Height: 800,
+		// Frameless: the native Windows title bar is replaced by the in-app
+		// header, which doubles as the OS title bar (drag region + custom
+		// min/max/close controls) so the window chrome matches the theme.
+		Frameless: true,
 		AssetServer: &assetserver.Options{
 			Assets:  assets,
 			Handler: app.assetHandler(),

@@ -36,8 +36,7 @@ func authorRouter(t *testing.T, authorJSON string) (*httptest.Server, *url.Value
 }
 
 func testClient(srv *httptest.Server) *Client {
-	c := NewClient("TestAgent/1.0")
-	c.base = srv.URL
+	c := NewClient("TestAgent/1.0", srv.URL)
 	c.interval = time.Millisecond
 	return c
 }
@@ -171,6 +170,36 @@ func TestSearchMapsResults(t *testing.T) {
 	}
 	if subjects["masashi kishimoto"] != tag.Artist || subjects["action"] != tag.Tag {
 		t.Errorf("mapped tags wrong: %+v", g.Tags)
+	}
+}
+
+// GalleryByID requests includes[]=cover_art, so the cover URL mapSearchResult builds must
+// ride onto the neutral detail — a detail-fetched candidate (the id-in-folder shortcut)
+// otherwise has no cover to show (roadmap 3.5).
+func TestGalleryByIDCarriesCover(t *testing.T) {
+	const detailBody = `{"data":{"id":"abc-123","type":"manga","attributes":{"title":{"en":"Naruto"},"originalLanguage":"ja"},"relationships":[{"id":"c1","type":"cover_art","attributes":{"fileName":"cover.jpg"}}]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(detailBody))
+	}))
+	defer srv.Close()
+
+	d, err := testClient(srv).GalleryByID(context.Background(), "abc-123")
+	if err != nil {
+		t.Fatalf("GalleryByID: %v", err)
+	}
+	if want := "https://uploads.mangadex.org/covers/abc-123/cover.jpg.256.jpg"; d.Thumbnail != want {
+		t.Errorf("thumbnail = %q, want %q", d.Thumbnail, want)
+	}
+}
+
+// NewClient's baseURL override backs config.SourceConfig.BaseURL: empty keeps the default,
+// a value is trimmed and used (an API-domain move is then a settings edit, not a release).
+func TestBaseURLOverride(t *testing.T) {
+	if got := NewClient("UA", "").base; got != defaultBaseURL {
+		t.Errorf("empty baseURL gave %q, want %q", got, defaultBaseURL)
+	}
+	if got := NewClient("UA", "  https://example.test/api  ").base; got != "https://example.test/api" {
+		t.Errorf("override gave %q", got)
 	}
 }
 

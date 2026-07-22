@@ -19,13 +19,19 @@ import (
 // It exists because a site can move its data domain out from under a shipped binary —
 // hitomi did exactly that (ltn.hitomi.la stopped resolving after the 2025-03 move), and
 // recovering from the next one should be a settings edit, not a release.
+//
+// RateLimitMs overrides the minimum spacing (in milliseconds) between that source's
+// requests; 0 keeps the provider's built-in default, which is tuned to each site's
+// tolerance. It exists so a power user can tune the throttle from config.json — lowering
+// it risks a rate-limit ban, raising it trades sweep speed for safety.
 type SourceConfig struct {
-	Provider  string            `json:"provider"`
-	APIKey    string            `json:"api_key"`
-	UserAgent string            `json:"user_agent"`
-	BaseURL   string            `json:"base_url,omitempty"`
-	Secrets   map[string]string `json:"secrets,omitempty"`
-	Enabled   bool              `json:"enabled"`
+	Provider    string            `json:"provider"`
+	APIKey      string            `json:"api_key"`
+	UserAgent   string            `json:"user_agent"`
+	BaseURL     string            `json:"base_url,omitempty"`
+	Secrets     map[string]string `json:"secrets,omitempty"`
+	RateLimitMs int               `json:"rate_limit_ms,omitempty"`
+	Enabled     bool              `json:"enabled"`
 }
 
 // Config mirrors the on-disk config.json schema. Port is kept for backward

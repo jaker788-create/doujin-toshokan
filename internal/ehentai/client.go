@@ -138,6 +138,7 @@ type ehGallery struct {
 	Title     string   `json:"title"`
 	TitleJpn  string   `json:"title_jpn"`
 	Category  string   `json:"category"`
+	Thumb     string   `json:"thumb"`
 	FileCount flexNum  `json:"filecount"`
 	Tags      []string `json:"tags"`
 	Error     string   `json:"error"`
@@ -176,6 +177,26 @@ func NewClient(userAgent, baseURL string) *Client {
 		interval:  defaultInterval,
 		http:      &http.Client{Timeout: requestTimeout},
 	}
+}
+
+// SetRateLimit overrides the minimum spacing between requests, replacing defaultInterval;
+// a non-positive duration is ignored. It backs config.SourceConfig.RateLimitMs, applied at
+// build time before first use. The default is tuned to the site's tolerance, so lowering it
+// risks a rate-limit ban.
+func (c *Client) SetRateLimit(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.interval = d
+	c.mu.Unlock()
+}
+
+// RateLimit reports the minimum spacing currently enforced between requests.
+func (c *Client) RateLimit() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.interval
 }
 
 // Slug and Label identify the provider (source.Provider).
@@ -223,11 +244,11 @@ func (c *Client) GalleryByID(ctx context.Context, id string) (*source.GalleryDet
 		JapaneseTitle: strings.TrimSpace(html.UnescapeString(g.TitleJpn)),
 		PrettyTitle:   title,
 		GalleryURL:    fmt.Sprintf("%s/g/%d/%s/", siteBaseURL, outGID, outToken),
-		NumPages:      g.FileCount.int(),
-		Tags:          mapTags(g),
-		// Thumbnail: the response carries an absolute `thumb` URL and it would be genuinely
-		// useful — but source.GalleryDetail has no Thumbnail field yet. Adding one is its
-		// own change (roadmap 3.5), not something to smuggle in here.
+		// The response carries an absolute cover URL; now that GalleryDetail holds one
+		// (roadmap 3.5) it rides straight through — no per-site reconstruction.
+		Thumbnail: strings.TrimSpace(g.Thumb),
+		NumPages:  g.FileCount.int(),
+		Tags:      mapTags(g),
 	}, nil
 }
 

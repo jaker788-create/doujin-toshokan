@@ -181,6 +181,26 @@ func NewClient(userAgent, baseURL string) *Client {
 	}
 }
 
+// SetRateLimit overrides the minimum spacing between requests, replacing defaultInterval;
+// a non-positive duration is ignored. It backs config.SourceConfig.RateLimitMs, applied at
+// build time before first use. The default is tuned to the site's tolerance, so lowering it
+// risks a rate-limit ban.
+func (c *Client) SetRateLimit(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.interval = d
+	c.mu.Unlock()
+}
+
+// RateLimit reports the minimum spacing currently enforced between requests.
+func (c *Client) RateLimit() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.interval
+}
+
 // Slug and Label identify the provider (source.Provider).
 func (c *Client) Slug() string  { return Slug }
 func (c *Client) Label() string { return Label }

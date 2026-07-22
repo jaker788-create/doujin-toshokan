@@ -4,8 +4,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"doujin/internal/config"
 	"doujin/internal/doujin"
+	"doujin/internal/ingest"
+	"doujin/internal/search"
 )
 
 // refHintSamples is a real gallery ref per provider, in the shape its folder-name prefix
@@ -105,8 +109,15 @@ func TestNhentaiRequiresKey(t *testing.T) {
 	if p.Slug() != "nhentai" {
 		t.Errorf("active = %q, want nhentai", p.Slug())
 	}
-	if s, _ := a.GetSettings(); !s.ActiveSourceReady || !s.HasNhentaiKey {
-		t.Errorf("settings after key = %+v, want ready + has key", s)
+	if s, _ := a.GetSettings(); !s.ActiveSourceReady {
+		t.Errorf("settings after key = %+v, want ready", s)
+	}
+	// The stored key surfaces (masked) through GetSources, not GetSettings — see roadmap 3.6.
+	srcs, _ := a.GetSources()
+	for _, s := range srcs {
+		if s.Slug == "nhentai" && !s.HasKey {
+			t.Errorf("nhentai source after key = %+v, want has_key", s)
+		}
 	}
 }
 
@@ -197,5 +208,132 @@ func TestUnknownProviderRejected(t *testing.T) {
 	}
 	if err := a.SetSourceConfig("bogus", "", "", true); err == nil {
 		t.Error("SetSourceConfig(bogus) should error")
+	}
+}
+
+// search.SourceNone is the library filter's "never auto-tagged" sentinel, carried in the
+// same field as a real provider slug (SearchArgs.Source). If a provider ever registered
+// that slug, filtering for it would silently return the untagged titles instead of that
+// source's. internal/search is a leaf package that cannot import this registry to check
+// itself, so the pin lives here.
+func TestSourceNoneSentinelIsNotAProviderSlug(t *testing.T) {
+	for _, p := range providerPresets {
+		if p.Slug == search.SourceNone {
+			t.Errorf("provider %q uses the reserved untagged sentinel %q — "+
+				"rename the slug or change search.SourceNone", p.Label, search.SourceNone)
+		}
+	}
+}
+
+// The facet list must label every slug the library actually holds, including one whose
+// provider is no longer registered — those titles still have to be findable.
+func TestSourceFacetsLabelUnknownAndUntagged(t *testing.T) {
+	a := newTestApp(t)
+	id, err := ingest.IngestManga(a.db, ingest.MangaInput{
+		Title: "Orphan", Author: "Nobody", FolderPath: "/orphan", PageCount: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec("UPDATE manga SET source_slug=? WHERE id=?", "defunct-site", id); err != nil {
+		t.Fatal(err)
+	}
+	// A second title left untagged, so both buckets are exercised.
+	if _, err := ingest.IngestManga(a.db, ingest.MangaInput{
+		Title: "Plain", Author: "Nobody", FolderPath: "/plain", PageCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	facets, err2 := a.GetSourceFacets()
+	if err2 != nil {
+		t.Fatalf("GetSourceFacets: %v", err2)
+	}
+	byS := map[string]SourceFacet{}
+	for _, f := range facets {
+		byS[f.Slug] = f
+	}
+	if got, ok := byS["defunct-site"]; !ok || got.Label != "defunct-site" || got.Count != 1 {
+		t.Errorf("unregistered slug facet = %+v (all: %+v), want label=slug count=1", got, facets)
+	}
+	if got, ok := byS[search.SourceNone]; !ok || got.Label != "Untagged" || got.Count != 1 {
+		t.Errorf("untagged facet = %+v (all: %+v), want label=Untagged count=1", got, facets)
+	}
+	if facets[len(facets)-1].Slug != search.SourceNone {
+		t.Errorf("untagged facet must sort last, got %+v", facets)
+	}
+}
+
+// The detail payload resolves source_slug to a display label, because the slug→label
+// registry lives here and not in the frontend. An unregistered slug labels as itself
+// rather than blank, and a never-tagged title carries no label at all.
+func TestGetMangaSourceLabel(t *testing.T) {
+	a := newTestApp(t)
+	cases := []struct {
+		name, slug, want string
+	}{
+		{"registered", "ehentai", "E-Hentai"},
+		{"unregistered", "defunct-site", "defunct-site"},
+		{"blank slug", "", ""},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := "/lbl" + string(rune('a'+i))
+			id, err := ingest.IngestManga(a.db, ingest.MangaInput{
+				Title: "T", Author: "A", FolderPath: path, PageCount: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.slug != "" {
+				if _, err := a.db.Exec("UPDATE manga SET source_slug=? WHERE id=?", c.slug, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d, err := a.GetManga(id)
+			if err != nil {
+				t.Fatalf("GetManga: %v", err)
+			}
+			if d.SourceLabel != c.want {
+				t.Errorf("source_label = %q, want %q", d.SourceLabel, c.want)
+			}
+		})
+	}
+}
+
+// A positive SourceConfig.RateLimitMs must reach the built client's throttle; 0 must leave
+// the provider's own default in place. Every provider is exercised, so a new one that
+// forgets the rateLimited methods — and would silently ignore the setting — fails here.
+// (roadmap 3.9)
+func TestBuildProviderAppliesRateLimit(t *testing.T) {
+	const override = 750 * time.Millisecond
+	for slug := range refHintSamples {
+		base := config.SourceConfig{Provider: slug, Enabled: true}
+		if slug == "nhentai" {
+			base.APIKey = "k" // nhentai won't build without one
+		}
+
+		tuned := base
+		tuned.RateLimitMs = int(override / time.Millisecond)
+		p, err := buildProvider(tuned)
+		if err != nil {
+			t.Fatalf("buildProvider(%s, tuned): %v", slug, err)
+		}
+		rl, ok := p.(rateLimited)
+		if !ok {
+			t.Fatalf("%s provider does not implement rateLimited — RateLimitMs would be ignored", slug)
+		}
+		if got := rl.RateLimit(); got != override {
+			t.Errorf("%s tuned RateLimit() = %v, want %v", slug, got, override)
+		}
+
+		// No override: the provider keeps its own (nonzero) default, distinct from ours.
+		d, err := buildProvider(base)
+		if err != nil {
+			t.Fatalf("buildProvider(%s, default): %v", slug, err)
+		}
+		if got := d.(rateLimited).RateLimit(); got <= 0 || got == override {
+			t.Errorf("%s default RateLimit() = %v, want a nonzero provider default", slug, got)
+		}
 	}
 }
