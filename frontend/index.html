@@ -20,6 +20,18 @@
     <button id="rescan-btn" class="icon-btn" aria-label="Rescan library" title="Rescan library">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.3L3 16M3 21v-5h5"/></svg>
     </button>
+    <div class="win-controls">
+        <button id="win-min" class="win-btn" aria-label="Minimize" title="Minimize">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+        </button>
+        <button id="win-max" class="win-btn" aria-label="Maximize" title="Maximize / restore">
+            <svg class="ico-max" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+            <svg class="ico-restore" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9V7a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-2"/><rect x="6" y="9" width="9" height="9" rx="1"/></svg>
+        </button>
+        <button id="win-close" class="win-btn win-close" aria-label="Close" title="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
+        </button>
+    </div>
 </header>
 <main id="view"></main>
 <div id="toast-region" aria-live="polite" aria-atomic="false"></div>

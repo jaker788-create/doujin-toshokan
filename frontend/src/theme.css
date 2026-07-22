@@ -135,6 +135,34 @@ header .nav-spacer { margin-left: auto; }
 .icon-btn:hover { color: var(--vermilion); border-color: var(--vermilion); background: var(--vermilion-soft); }
 .icon-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; }
 
+/* Frameless window: the app-bar doubles as the OS title bar. The header is the
+   drag region (Wails' --wails-draggable, a CSS custom property that *inherits*,
+   so every interactive child must explicitly opt back out or clicks would start
+   a window drag instead of firing). */
+body > header { --wails-draggable: drag; user-select: none; -webkit-user-select: none; }
+body > header a,
+body > header button,
+body > header input,
+body > header select { --wails-draggable: no-drag; }
+
+/* Window controls (minimize / maximize-restore / close) — borderless, sitting
+   where the native caption buttons used to be. Close lights up danger-red. */
+.win-controls { display: flex; align-items: center; gap: 2px; }
+.win-btn {
+  background: transparent; border: 0; color: var(--paper-mute);
+  width: 42px; height: 32px; padding: 0; cursor: pointer; border-radius: var(--r-2);
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.win-btn:hover { color: var(--paper); background: var(--rule-strong); }
+.win-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.win-close:hover { color: var(--paper); background: var(--danger); }
+/* Maximize vs restore glyph — JS toggles data-max on the button as the window
+   maximizes/restores. */
+.win-btn .ico-restore { display: none; }
+.win-btn[data-max="1"] .ico-max { display: none; }
+.win-btn[data-max="1"] .ico-restore { display: inline; }
+
 /* Hero */
 .hero { margin: var(--s-6) 0 var(--s-7); }
 .hero .eyebrow {

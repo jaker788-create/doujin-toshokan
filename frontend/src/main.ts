@@ -11,7 +11,10 @@ import {
     StartAutoTag, CancelAutoTag,
 } from '../wailsjs/go/main/App';
 import { main, search, stash, tag } from '../wailsjs/go/models';
-import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
+import {
+    EventsOn, BrowserOpenURL,
+    WindowMinimise, WindowToggleMaximise, WindowIsMaximised, Quit,
+} from '../wailsjs/runtime/runtime';
 
 type Manga = search.Manga;
 type MangaDetail = main.MangaDetail;
@@ -2387,6 +2390,26 @@ document.getElementById('rescan-btn')?.addEventListener('click', async () => {
         btn.disabled = false;
     }
 });
+
+// Custom window controls — the window is frameless, so the header is the OS
+// title bar and these three buttons stand in for the native caption controls.
+const winMax = document.getElementById('win-max');
+const syncMaxIcon = async () => {
+    try { winMax?.setAttribute('data-max', (await WindowIsMaximised()) ? '1' : '0'); }
+    catch { /* runtime absent (e.g. plain browser preview) — leave as-is */ }
+};
+document.getElementById('win-min')?.addEventListener('click', () => WindowMinimise());
+winMax?.addEventListener('click', () => WindowToggleMaximise());
+document.getElementById('win-close')?.addEventListener('click', () => Quit());
+// Double-clicking the drag region (but not a control) toggles maximize, matching
+// native title-bar behaviour.
+document.querySelector('body > header')?.addEventListener('dblclick', (e) => {
+    if ((e.target as HTMLElement).closest('a, button, input, select')) return;
+    WindowToggleMaximise();
+});
+// The window fires resize on maximize/restore; keep the glyph in sync off that.
+window.addEventListener('resize', () => { void syncMaxIcon(); });
+void syncMaxIcon();
 
 // Right-click behaviour — the power-user shortcut for the same save-for-later action
 // the visible bookmark buttons perform:
