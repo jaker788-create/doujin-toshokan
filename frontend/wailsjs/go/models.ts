@@ -270,8 +270,6 @@ export namespace main {
 	    }
 	}
 	export class Settings {
-	    has_nhentai_key: boolean;
-	    nhentai_user_agent: string;
 	    active_source: string;
 	    active_source_label: string;
 	    active_source_ready: boolean;
@@ -282,8 +280,6 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.has_nhentai_key = source["has_nhentai_key"];
-	        this.nhentai_user_agent = source["nhentai_user_agent"];
 	        this.active_source = source["active_source"];
 	        this.active_source_label = source["active_source_label"];
 	        this.active_source_ready = source["active_source_ready"];

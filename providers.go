@@ -53,7 +53,7 @@ var providerPresets = []providerPreset{
 
 // providerLabel maps a slug to its human label for display, falling back to the slug
 // itself for anything unregistered. The label is a presentation concern of the registry,
-// which is why the matcher's nhSearcher interface carries Slug() but not Label().
+// which is why the matcher's providerSearcher interface carries Slug() but not Label().
 func providerLabel(slug string) string {
 	for _, p := range providerPresets {
 		if p.Slug == slug {

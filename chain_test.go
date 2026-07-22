@@ -44,7 +44,7 @@ func (c *chainStub) GalleryByID(_ context.Context, id string) (*source.GalleryDe
 
 // buildChain assembles a chain from stubs in priority order, mirroring newSourceChain's
 // contract (id-only members never enter the fuzzy list). It builds the runs directly
-// because newSourceChain takes source.Provider while a run only ever uses the nhSearcher
+// because newSourceChain takes source.Provider while a run only ever uses the providerSearcher
 // slice of it — TestNewSourceChainWiring covers the real constructor.
 func buildChain(fallback bool, idOnly map[string]bool, stubs ...*chainStub) *sourceChain {
 	ch := &sourceChain{bySlug: map[string]*autoTagRun{}}
@@ -390,7 +390,7 @@ func TestNewSourceChainWiring(t *testing.T) {
 }
 
 // chainProviderStub adapts chainStub to the full source.Provider interface, which
-// newSourceChain takes (the runs themselves only need the nhSearcher slice).
+// newSourceChain takes (the runs themselves only need the providerSearcher slice).
 type chainProviderStub struct{ chainStub }
 
 func (c *chainProviderStub) Label() string { return c.slug }

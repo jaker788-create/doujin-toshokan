@@ -18,8 +18,16 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > **2.4 was never actually the gate** it was recorded as), and **2.5** (the library half —
 > detail-page provenance chip + a faceted source filter through `SearchManga`).
 > **3.5 was attempted and reverted** — not the quick win it looked like; see the item.
-> Still open: **2.4** (deferred, no longer blocking anything), the page-count decision in
-> **2.3**, and the rest of §3.
+>
+> **Progress (this branch):** **3.4** (the `nhSearcher` → `providerSearcher` rename +
+> `nhentai.go` → `tagging.go`), **3.6** (the legacy `Settings.HasNhentaiKey`/
+> `NhentaiUserAgent` fields retired — per-source key state + User-Agent now ride on
+> `SourceState`/`GetSources`; the `config` legacy synth stays for old files), and the
+> **2.3** page-count decision — `confidentMatch` may now stop early on an artist-confirmed
+> strong title when a provider reports no page count. **2.4 is decided: no cookie auth** —
+> the keyless `gdata` API is enough and cookies buy only ExHentai-exclusive galleries
+> nobody has needed; `SourceConfig.Secrets` stays as the seam if that ever changes.
+> Still open: the rest of §3 (**3.5**, **3.7**, **3.8**, **3.9**).
 
 ---
 
@@ -218,51 +226,54 @@ hitomi (**zero** requests). Against that: a thread-safe run cache with single-fl
 ordered progress emission, and `MaxOpenConns(1)` keeping applies serialized anyway. The loop
 is structured so it stays possible if a real sweep ever proves slow.
 
-### 2.3 MangaDex language + page-count handling — **language done, page count open**
+### 2.3 MangaDex language + page-count handling — ✅ DONE
 The **language** half landed (with 3.3): `SearchResult.Language` is provider-supplied and
 `candLangResolver` prefers it over the title-decoration heuristic.
 
-The **page-count** half is still open, and its effects are wider than "ranks a bit worse".
-A MangaDex series has chapters, not a single page count, so `NumPages` is always 0. Traced
-through the scorer, that means:
+The **page-count** half is now resolved too (see the open-decision box below): the effects
+are wider than "ranks a bit worse". A MangaDex series has chapters, not a single page count,
+so `NumPages` is always 0. Traced through the scorer, that means:
 
 | | Affected? |
 |---|---|
 | The displayed **title %** (`TitleScore`) | **No** — pure title similarity; page count never touches it |
 | Ranking `Score` | Loses `pageBonus` (0.5, large next to a 0–1 title score). Harmless *within* MangaDex — every candidate lacks it equally — but it is why the pooled review groups by provider instead of interleaving by score |
 | `qualifies` (auto vs review) | **Loses 2 of 4 routes.** `PagesClose && title≥0.6` and `ArtistMatch && PagesExact` both need `NumPages > 0`. Only artist+decent-title and near-perfect-title survive, so MangaDex needs a stronger signal to auto-apply |
-| `confidentMatch` (`nhentai.go`) | **Never fires** — it gates on `c.PagesClose`. So every MangaDex title runs the *full* search budget plus a catalog page-through even after a perfect hit. MangaDex titles are the most expensive in a sweep |
+| `confidentMatch` (`tagging.go`) | **Now fires on a no-page-count candidate** when the title is strong *and* the artist is confirmed (the resolved decision below). Before, it gated on `c.PagesClose` and so never fired for MangaDex — every MangaDex title ran the full search budget plus a catalog page-through even after a perfect hit. A known-but-far page count still blocks the early stop; only a genuinely absent count defers to the artist tag |
 | `pagesCloseTo` merge guard | Inert (returns true when either side ≤ 0), so the "don't merge a same-titled but differently-sized work" guard does nothing for MangaDex |
 
 Fixed already: the UI rendered `0p`, which read as an empty gallery rather than an absent
 signal; it now says "page count n/a".
 
-**Open decision:** should `confidentMatch` be allowed to stop early on artist-match + strong
-title when no page count exists? It would cut the request cost noticeably, at the price of
-the page gate that currently stops the ladder from ending on a plausible-but-wrong title.
-A chapter-count or first-chapter page count from MangaDex is *not* a substitute — it is not
-the same quantity as a doujin's page count and would corroborate nothing.
+**Decided (this branch): yes.** `confidentMatch` now stops early on an artist-confirmed
+strong title when the candidate reports **no** page count — cutting the per-title request
+cost for the most expensive titles in a sweep. The safety trade was contained rather than
+swallowed: the artist tag is *required* as the stand-in gate (a strong title alone, with
+neither a page count nor an artist to corroborate it, still does not end the search), and a
+*known-but-far* page count still blocks the stop — that is a real size disagreement, not a
+missing signal. A chapter-count or first-chapter page count from MangaDex was rejected as a
+substitute: it is not the same quantity as a doujin's page count and would corroborate
+nothing. `TestConfidentMatchNoPageCount` pins the three cases.
 
 - Content-rating filter (`contentRatings` in mangadex/client.go) is hardcoded to include
   adult content. Expose as a per-source setting? (Probably fine hardcoded for this app.)
 
-### 2.4 E-Hentai cookie auth in the UI — **deferred, and no longer a gate**
+### 2.4 E-Hentai cookie auth in the UI — ❌ WON'T DO (decided this branch)
 This was recorded as blocking 1.1 on the premise that E-Hentai needs auth. It does not:
 `api.e-hentai.org`'s `gdata` method answers unauthenticated, and 1.1 shipped keyless.
 
 What cookies (`ipb_member_id`, `ipb_pass_hash`) would actually buy is **ExHentai-exclusive
-and expunged galleries** — a real but narrow gap, and one no user has hit yet.
-`SourceConfig.Secrets` still exists for it.
-
-The decision itself is unchanged and still worth making *before* writing any of it: a
-generic key/value secrets editor keyed off a provider-declared schema, or a bespoke
-two-field E-Hentai form? The generic one scales better as sources grow — and note that
-`providerPreset` has since grown `NeedsKey`, `IDOnly` and `RefHint`, so a provider-declared
-field schema is the shape that registry is already trending toward.
+and expunged galleries** — a real but narrow gap, and one no user has hit. **Decision: don't
+build it.** The keyless API covers the case this app has, and standing up either UI shape (a
+generic provider-declared secrets editor or a bespoke two-field E-Hentai form) is real work
+for a hypothetical user. `SourceConfig.Secrets` stays as the wiring seam so this is a
+UI-only revival if it ever earns its place.
 
 **Trigger to revisit:** a folder whose `ehentai-<gid>-<token>` ref returns
-"Gallery not found" while the gallery plainly exists on ExHentai. Until then this is
-speculative UI for a hypothetical user.
+"Gallery not found" while the gallery plainly exists on ExHentai. Until then this stays
+closed; when it reopens, the generic secrets editor is the better shape — `providerPreset`
+has since grown `NeedsKey`, `IDOnly` and `RefHint`, so a provider-declared field schema is
+what that registry is already trending toward.
 
 ### 2.5 Source provenance in the library UI — ✅ DONE
 Provenance rides through the *matching* path, because 2.2 made it a correctness
@@ -330,9 +341,11 @@ its faceted count.
 2. **MangaDex retry/backoff — S.** nhentai's `do` honors 429 + `Retry-After`; MangaDex's
    `do` does not. Add the same retry loop (MangaDex returns 429 under load).
 3. **Provider-supplied language into ranking — S.** See 2.3.
-4. **Rename `nhSearcher` → `providerSearcher` — S.** The interface in `nhentai.go` is
-   still nhentai-named though it's provider-generic; likewise rename the file
-   `nhentai.go` → `tagging.go`.
+4. **Rename `nhSearcher` → `providerSearcher` — ✅ DONE.** The interface is renamed (it was
+   nhentai-named though provider-generic), and the file `nhentai.go` → `tagging.go`, which
+   `internal/nhentai/client.go`'s package doc already pointed at. The companion test file
+   keeps its `nhentai_test.go` name — it holds broader app tests (ingest, remove-missing,
+   delete) beyond the tagging surface, so renaming it would overstate the move.
 5. **Drop the frontend's nhentai CDN reconstruction — ~~S~~ M.** `coverCandidates`/`wireCover`
    in `main.ts` rebuild `t.nhentai.net/...` from `media_id`. It *looks* like every provider
    supplies an absolute `thumbnail` (nhentai search + MangaDex do), so the fallback reads as
@@ -346,8 +359,13 @@ its faceted count.
      parsing the cover *extension* from the v2 detail API's `images` object (`t = j/p/g/w`),
      which is the whole reason the frontend cascades over four extensions. Only then can the
      frontend fallback go. So this is **M**, not S, and gated on a `source` type change.
-6. **Retire legacy `Settings.HasNhentaiKey`/`NhentaiUserAgent` — S.** Once the UI fully
-   uses `GetSources`, these can go (keep the `config` legacy synth for old files).
+6. **Retire legacy `Settings.HasNhentaiKey`/`NhentaiUserAgent` — ✅ DONE.** Both fields are
+   gone from the `Settings` DTO. The UI reads key presence from `SourceState.HasKey` and the
+   per-source User-Agent from `SourceState.UserAgent` (both via `GetSources`) — the key-save
+   handler pulls the active source's UA from there instead of the retired field. The
+   `config`-level legacy synth (`ResolveSources` from `NhentaiAPIKey`/`NhentaiUserAgent`)
+   stays, so old `config.json` files still work. The masking test moved to
+   `TestGetSourcesMasksKey`.
 7. **MangaDex id display — S (cosmetic).** The picker shows `#<gallery_id>`; a UUID reads
    badly. Hide the `#id` for non-numeric ids.
 8. **End-to-end `MatchSource` test with a MangaDex fake — M.** Current tests cover the
@@ -377,11 +395,16 @@ Hitomi provider (1.2) ────────► ✅ done — first ID-only pro
 multi-source fallback (2.2) ──► ✅ done — provider chain; id routing + ordered fallback
 E-Hentai provider (1.1) ──────► ✅ done — keyless; 2.4 was not the gate it looked like
 library provenance (2.5) ─────► ✅ done — detail chip + faceted source filter
+rename + retire legacy (3.4/3.6) ► ✅ done — providerSearcher/tagging.go; Settings slimmed
+confident-match early stop (2.3) ► ✅ done — no-page-count titles stop on artist + strong title
+e-hentai cookies (2.4) ───────► ❌ won't do — keyless API is enough
 ```
 
-**Next up: the remaining Small items in §3**, all independent, plus the one open decision
-in **2.3** (should `confidentMatch` stop early on artist + strong title when a provider
-reports no page count? — it is why MangaDex titles are the most expensive in a sweep).
+**Next up: the remaining §3 items**, all independent: **3.5** (drop the frontend nhentai CDN
+reconstruction — **M**, gated on adding `Thumbnail` to `source.GalleryDetail`), **3.7** (hide
+`#id` for non-numeric ids in the *match picker*), **3.8** (an end-to-end `MatchSource` test
+with a MangaDex fake — **M**), and **3.9** (per-source rate-limit config). With 2.3 and 2.4
+resolved, no open decisions remain.
 
 Note that **3.7 is now narrower than it reads**: the detail page sidesteps the ugly-id
 problem by putting the ref in a tooltip, so what is left is the *match picker's* `#<id>`
@@ -392,9 +415,7 @@ name → parser → API → mapped tags) *and* driven through the real UI, closi
 section previously flagged: the sweep loop, the provider chain, the pooled review card and
 the per-source chips all behave as intended against a real library.
 
-Remaining Small items, all independent: **3.4** (rename `nhSearcher` → `providerSearcher`,
-`nhentai.go` → `tagging.go` — note `internal/mangadex/client.go`'s package doc already
-refers to "the root tagging.go", and the file now holds the chain as well as the matcher, so
-the name has drifted further), **3.6** (retire the legacy `Settings.HasNhentaiKey`), **3.7**
-(hide `#id` for non-numeric ids — now two sources deep, since e-hentai's
-`#618395/0439fa3666` reads as badly as a MangaDex UUID).
+Remaining Small items, all independent: **3.7** (hide `#id` for non-numeric ids — now two
+sources deep, since e-hentai's `#618395/0439fa3666` reads as badly as a MangaDex UUID) and
+**3.9** (per-source rate-limit config). **3.4** and **3.6** landed this branch; **3.5** and
+**3.8** are the two **M** items left.

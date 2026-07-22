@@ -2068,9 +2068,12 @@ async function renderScan(): Promise<void> {
         if (!v) { toast('Enter a key first', 'err'); return; }
         saveKeyBtn.disabled = true;
         try {
-            // Save the key against the active (key-requiring) source and enable it.
+            // Save the key against the active (key-requiring) source and enable it,
+            // preserving that source's existing User-Agent (carried on its SourceState,
+            // since Settings no longer surfaces the legacy nhentai_user_agent — roadmap 3.6).
             const slug = settings.active_source || 'nhentai';
-            await SetSourceConfig(slug, v, settings.nhentai_user_agent || '', true);
+            const activeSrc = sources.find((s) => s.slug === slug);
+            await SetSourceConfig(slug, v, activeSrc?.user_agent || '', true);
             toast('Key saved');
             render();
         } catch (err) {

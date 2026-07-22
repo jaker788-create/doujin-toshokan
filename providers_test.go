@@ -107,8 +107,15 @@ func TestNhentaiRequiresKey(t *testing.T) {
 	if p.Slug() != "nhentai" {
 		t.Errorf("active = %q, want nhentai", p.Slug())
 	}
-	if s, _ := a.GetSettings(); !s.ActiveSourceReady || !s.HasNhentaiKey {
-		t.Errorf("settings after key = %+v, want ready + has key", s)
+	if s, _ := a.GetSettings(); !s.ActiveSourceReady {
+		t.Errorf("settings after key = %+v, want ready", s)
+	}
+	// The stored key surfaces (masked) through GetSources, not GetSettings — see roadmap 3.6.
+	srcs, _ := a.GetSources()
+	for _, s := range srcs {
+		if s.Slug == "nhentai" && !s.HasKey {
+			t.Errorf("nhentai source after key = %+v, want has_key", s)
+		}
 	}
 }
 
