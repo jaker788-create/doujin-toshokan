@@ -373,10 +373,10 @@ its faceted count.
      nhentai/ehentai/mangadex `GalleryByID` cover assertions, and
      `TestGalleryIDCandidateCarriesThumbnail`.
    - **⚠ The original goal — deleting the frontend `media_id` + four-extension cascade — does
-     NOT hold, and was reverted 2026-07-22 after covers went blank in the GUI.** A nhentai
-     *search* list item's thumbnail URL frequently names the wrong extension (cover is
-     webp/png/gif, the field says jpg) and nhentai gives no reliable per-list-item extension to
-     fix server-side, so `wireCover` still walks
+     NOT hold, and was reverted 2026-07-22 after covers went blank in the GUI (fix confirmed
+     live the same day).** A nhentai *search* list item's thumbnail URL frequently names the
+     wrong extension (cover is webp/png/gif, the field says jpg) and nhentai gives no reliable
+     per-list-item extension to fix server-side, so `wireCover` still walks
      `t.nhentai.net/<media_id>/thumb.{jpg,webp,png,gif}` as a fallback behind the server cover.
      The server cover *is* the correct primary for the shortcut/preview + MangaDex/E-Hentai
      cases (which the cascade never covered); the cascade remains for nhentai search rows. Net:
@@ -463,5 +463,6 @@ branch; every §3 item is done and no open decisions remain.
 > **GUI note (3.5).** Cover-URL *construction* is unit-tested (type code → extension →
 > absolute URL) for all three providers, but the actual WebView2 image load was NOT verified
 > before shipping — and the frontend-cascade removal broke nhentai covers in the GUI as a
-> result. Fixed 2026-07-22 by keeping the `media_id` fallback cascade behind the server cover;
-> awaiting a live re-confirmation that nhentai search + shortcut covers render again.
+> result. Fixed 2026-07-22 by keeping the `media_id` fallback cascade behind the server cover,
+> and **confirmed in the GUI that day** — nhentai covers render again. Lesson: a cover change
+> is not done until the image is seen loading in the running app, never on URL unit tests alone.
