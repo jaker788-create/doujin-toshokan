@@ -165,18 +165,37 @@ function setReaderFitWidth(on: boolean): void {
 
 // ───── candidate cover (remote) ───────────────────────────────────
 // WebView2 loads each provider's public CDN directly, so a candidate cover is a plain
-// remote <img> — no proxy. Every provider now supplies an absolute `thumbnail` server-side:
-// search list items always did, and detail-fetched candidates (the id-in-folder shortcut,
-// the review previews) do too, since source.GalleryDetail carries a provider-built cover URL
-// (see MULTI_SOURCE_ROADMAP.md §3.5). So there is no per-site path to reconstruct here — the
-// old media_id + four-extension cascade is gone. A missing or failed cover falls back to a
-// neutral tile.
+// remote <img> — no proxy. The primary source is the absolute `thumbnail` the backend
+// supplies: search list items carry one, and detail-fetched candidates (the id-in-folder
+// shortcut, review previews) plus MangaDex/E-Hentai get theirs server-side too
+// (source.GalleryDetail.Thumbnail — see MULTI_SOURCE_ROADMAP.md §3.5).
+//
+// For nhentai that is NOT sufficient on its own, which §3.5 got wrong: a *search* list item's
+// thumbnail URL frequently names the wrong file extension (the cover is webp/png/gif but the
+// field says jpg), so the load 404s, and nhentai exposes no reliable per-list-item extension
+// to fix it server-side. So wireCover keeps the fallback: walk
+// t.nhentai.net/<media_id>/thumb.{jpg,webp,png,gif} until one resolves, then give up to a
+// neutral tile. The backend cover made this redundant for the shortcut/preview + non-nhentai
+// cases (their primary is now correct), but it is still load-bearing for nhentai search rows.
+const COVER_EXTS = ['jpg', 'webp', 'png', 'gif'];
+function coverCandidates(c: main.SourceCandidate): string[] {
+    const srcs: string[] = [];
+    if (c.thumbnail && /^https?:\/\//.test(c.thumbnail)) srcs.push(c.thumbnail);
+    if (c.media_id) {
+        const id = encodeURIComponent(c.media_id);
+        for (const ext of COVER_EXTS) srcs.push(`https://t.nhentai.net/galleries/${id}/thumb.${ext}`);
+    }
+    return srcs;
+}
 function wireCover(img: HTMLImageElement, c: main.SourceCandidate): void {
-    const url = c.thumbnail;
-    const miss = () => { img.classList.add('nh-cover-missing'); img.removeAttribute('src'); };
-    if (!url || !/^https?:\/\//.test(url)) { miss(); return; }
-    img.addEventListener('error', miss);
-    img.src = url;
+    const srcs = coverCandidates(c);
+    let i = 0;
+    const next = () => {
+        if (i >= srcs.length) { img.classList.add('nh-cover-missing'); img.removeAttribute('src'); return; }
+        img.src = srcs[i++];
+    };
+    img.addEventListener('error', next);
+    next(); // listener attached first, so a failed first src advances correctly
 }
 
 // renderMatchBadges turns a candidate's scoring signals into compact "why-match"
