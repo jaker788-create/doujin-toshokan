@@ -1676,6 +1676,10 @@ function buildMatchPicker(
         const candSrc = mixedSources && c.source_label
             ? `<span class="nh-src-chip">${esc(c.source_label)}</span> `
             : '';
+        // Only nhentai's short numeric ids read as a "#12345" gallery number. A MangaDex
+        // UUID or e-hentai's "gid/token" ref is noise next to the metadata and means nothing
+        // to the user — the title button already opens the gallery — so hide it. (roadmap 3.7)
+        const numericId = /^\d+$/.test(c.gallery_id);
         const row = document.createElement('div');
         row.className = 'nh-cand'
             + (merged ? ' merged' : '')
@@ -1684,9 +1688,9 @@ function buildMatchPicker(
         row.innerHTML = `
             <div class="nh-cover-wrap"><img class="nh-cover"></div>
             <div class="nh-cand-main">
-                <button type="button" class="nh-en nh-link" title="Open in browser">${esc(c.english_title || c.japanese_title || ('gallery #' + c.gallery_id))}</button>
+                <button type="button" class="nh-en nh-link" title="Open in browser">${esc(c.english_title || c.japanese_title || (numericId ? 'gallery #' + c.gallery_id : 'gallery'))}</button>
                 ${jp}
-                <span class="nh-meta">${candSrc}${pages} · ♥ ${c.num_favorites} · #${c.gallery_id}</span>
+                <span class="nh-meta">${candSrc}${pages} · ♥ ${c.num_favorites}${numericId ? ` · #${esc(c.gallery_id)}` : ''}</span>
                 ${renderMatchBadges(c)}
                 ${tags}
             </div>

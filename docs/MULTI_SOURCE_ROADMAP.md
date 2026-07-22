@@ -27,7 +27,8 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > strong title when a provider reports no page count. **2.4 is decided: no cookie auth** —
 > the keyless `gdata` API is enough and cookies buy only ExHentai-exclusive galleries
 > nobody has needed; `SourceConfig.Secrets` stays as the seam if that ever changes.
-> Still open: the rest of §3 (**3.5**, **3.7**, **3.8**, **3.9**).
+> **3.7** landed too (hide the `#id` for non-numeric ids in the match picker). Still open:
+> **3.5**, **3.8**, **3.9**.
 
 ---
 
@@ -366,8 +367,12 @@ its faceted count.
    `config`-level legacy synth (`ResolveSources` from `NhentaiAPIKey`/`NhentaiUserAgent`)
    stays, so old `config.json` files still work. The masking test moved to
    `TestGetSourcesMasksKey`.
-7. **MangaDex id display — S (cosmetic).** The picker shows `#<gallery_id>`; a UUID reads
-   badly. Hide the `#id` for non-numeric ids.
+7. **MangaDex id display — ✅ DONE.** The match-picker candidate card gated its `· #<id>`
+   metadata segment on a purely-numeric id, so only nhentai's short gallery numbers show it;
+   a MangaDex UUID or e-hentai's `gid/token` ref is dropped (it was noise next to the
+   metadata and the title button already opens the gallery). The titleless-candidate
+   fallback label was gated the same way — "gallery #123" for a numeric id, bare "gallery"
+   otherwise — so no raw UUID leaks there either.
 8. **End-to-end `MatchSource` test with a MangaDex fake — M.** Current tests cover the
    MangaDex client and the matcher separately; an integration test through
    `activeProvider()` → `gatherCandidates` → `Decide` would lock the wiring.
@@ -398,24 +403,20 @@ library provenance (2.5) ─────► ✅ done — detail chip + faceted s
 rename + retire legacy (3.4/3.6) ► ✅ done — providerSearcher/tagging.go; Settings slimmed
 confident-match early stop (2.3) ► ✅ done — no-page-count titles stop on artist + strong title
 e-hentai cookies (2.4) ───────► ❌ won't do — keyless API is enough
+id display (3.7) ─────────────► ✅ done — non-numeric ids hidden in the match picker
 ```
 
 **Next up: the remaining §3 items**, all independent: **3.5** (drop the frontend nhentai CDN
-reconstruction — **M**, gated on adding `Thumbnail` to `source.GalleryDetail`), **3.7** (hide
-`#id` for non-numeric ids in the *match picker*), **3.8** (an end-to-end `MatchSource` test
-with a MangaDex fake — **M**), and **3.9** (per-source rate-limit config). With 2.3 and 2.4
-resolved, no open decisions remain.
-
-Note that **3.7 is now narrower than it reads**: the detail page sidesteps the ugly-id
-problem by putting the ref in a tooltip, so what is left is the *match picker's* `#<id>`
-display only.
+reconstruction — **M**, gated on adding `Thumbnail` to `source.GalleryDetail`), **3.8** (an
+end-to-end `MatchSource` test with a MangaDex fake — **M**), and **3.9** (per-source
+rate-limit config, **S**). With 2.3 and 2.4 resolved, no open decisions remain.
 
 **Verified in the GUI (2026-07-18).** Every provider was probed live end to end (folder
 name → parser → API → mapped tags) *and* driven through the real UI, closing the gap this
 section previously flagged: the sweep loop, the provider chain, the pooled review card and
 the per-source chips all behave as intended against a real library.
 
-Remaining Small items, all independent: **3.7** (hide `#id` for non-numeric ids — now two
-sources deep, since e-hentai's `#618395/0439fa3666` reads as badly as a MangaDex UUID) and
-**3.9** (per-source rate-limit config). **3.4** and **3.6** landed this branch; **3.5** and
-**3.8** are the two **M** items left.
+Remaining items, all independent: **3.9** (per-source rate-limit config — the one **S** item
+left) plus the two **M** items, **3.5** (drop the frontend CDN reconstruction, gated on a
+`source.GalleryDetail.Thumbnail` field) and **3.8** (an end-to-end `MatchSource` test with a
+MangaDex fake). **3.4**, **3.6** and **3.7** landed this branch.
