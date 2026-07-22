@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"doujin/internal/config"
 	"doujin/internal/ehentai"
@@ -73,35 +74,54 @@ func knownProvider(slug string) bool {
 	return false
 }
 
+// rateLimited is a provider client whose request spacing can be overridden. Every built-in
+// client implements it (they share the single-limiter throttle), so the assertion in
+// buildProvider is a wiring check, not a maybe — a new provider that forgets these methods
+// would silently ignore RateLimitMs, which TestBuildProviderAppliesRateLimit guards against.
+type rateLimited interface {
+	SetRateLimit(time.Duration)
+	RateLimit() time.Duration
+}
+
 // buildProvider constructs the concrete source.Provider for a SourceConfig, applying each
 // provider's own auth requirement: nhentai needs an API key (errNoAPIKey without one),
 // MangaDex, hitomi and e-hentai need none. An empty User-Agent falls back to the app
-// default.
+// default, and a positive SourceConfig.RateLimitMs overrides the provider's built-in
+// request spacing.
 func buildProvider(sc config.SourceConfig) (source.Provider, error) {
 	ua := strings.TrimSpace(sc.UserAgent)
 	if ua == "" {
 		ua = defaultUserAgent
 	}
+	var p source.Provider
 	switch sc.Provider {
 	case nhentai.Slug:
 		key := strings.TrimSpace(sc.APIKey)
 		if key == "" {
 			return nil, errNoAPIKey
 		}
-		return nhentai.NewClient(key, ua), nil
+		p = nhentai.NewClient(key, ua)
 	case mangadex.Slug:
-		return mangadex.NewClient(ua), nil
+		p = mangadex.NewClient(ua)
 	case hitomi.Slug:
 		// Empty BaseURL means the client's own default; the override exists so a data
 		// domain move is recoverable from settings (see config.SourceConfig.BaseURL).
-		return hitomi.NewClient(ua, strings.TrimSpace(sc.BaseURL)), nil
+		p = hitomi.NewClient(ua, strings.TrimSpace(sc.BaseURL))
 	case ehentai.Slug:
 		// Keyless: the public gdata API needs no auth. ExHentai-exclusive galleries would
 		// need session cookies (SourceConfig.Secrets) — deliberately not wired yet.
-		return ehentai.NewClient(ua, strings.TrimSpace(sc.BaseURL)), nil
+		p = ehentai.NewClient(ua, strings.TrimSpace(sc.BaseURL))
 	default:
 		return nil, fmt.Errorf("unknown source provider %q", sc.Provider)
 	}
+	// A per-source override lets a power user tune request spacing from config.json; 0 keeps
+	// the provider default, which is set to each site's tolerance (roadmap 3.9).
+	if sc.RateLimitMs > 0 {
+		if rl, ok := p.(rateLimited); ok {
+			rl.SetRateLimit(time.Duration(sc.RateLimitMs) * time.Millisecond)
+		}
+	}
+	return p, nil
 }
 
 // activeProvider builds the provider for the currently-selected source in config. It is

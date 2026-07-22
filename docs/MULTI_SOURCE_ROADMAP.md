@@ -28,7 +28,8 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > the keyless `gdata` API is enough and cookies buy only ExHentai-exclusive galleries
 > nobody has needed; `SourceConfig.Secrets` stays as the seam if that ever changes.
 > **3.7** landed too (hide the `#id` for non-numeric ids in the match picker). Still open:
-> **3.5**, **3.8**, **3.9**.
+> **3.5** and **3.8** — the two remaining **M** items. **3.9** (per-source rate-limit config)
+> also landed: `SourceConfig.RateLimitMs` overrides a client's request spacing.
 
 ---
 
@@ -376,8 +377,15 @@ its faceted count.
 8. **End-to-end `MatchSource` test with a MangaDex fake — M.** Current tests cover the
    MangaDex client and the matcher separately; an integration test through
    `activeProvider()` → `gatherCandidates` → `Decide` would lock the wiring.
-9. **Per-source rate-limit config — S.** Intervals are hardcoded constants per client;
-   fine for now, but a `SourceConfig.RateLimitMs` would let power users tune.
+9. **Per-source rate-limit config — ✅ DONE.** `config.SourceConfig.RateLimitMs` (0 = the
+   provider default) now overrides a client's request spacing. Each client grew a
+   `SetRateLimit`/`RateLimit` pair over its existing single-limiter throttle, and
+   `buildProvider` applies the override through a small `rateLimited` interface every client
+   satisfies — `TestBuildProviderAppliesRateLimit` fails a future provider that forgets it
+   (the setting would otherwise be silently ignored). A non-positive value is guarded so a
+   stray config can't collapse the spacing to nothing. Left as config.json-only:
+   power-user tuning is the framing, and `SetSourceConfig` already preserves the field
+   in place across a UI key-save, so no picker knob was added.
 
 ---
 
@@ -404,19 +412,20 @@ rename + retire legacy (3.4/3.6) ► ✅ done — providerSearcher/tagging.go; S
 confident-match early stop (2.3) ► ✅ done — no-page-count titles stop on artist + strong title
 e-hentai cookies (2.4) ───────► ❌ won't do — keyless API is enough
 id display (3.7) ─────────────► ✅ done — non-numeric ids hidden in the match picker
+rate-limit config (3.9) ──────► ✅ done — SourceConfig.RateLimitMs overrides the throttle
 ```
 
-**Next up: the remaining §3 items**, all independent: **3.5** (drop the frontend nhentai CDN
-reconstruction — **M**, gated on adding `Thumbnail` to `source.GalleryDetail`), **3.8** (an
-end-to-end `MatchSource` test with a MangaDex fake — **M**), and **3.9** (per-source
-rate-limit config, **S**). With 2.3 and 2.4 resolved, no open decisions remain.
+**Next up: the two remaining §3 items**, both **M** and independent: **3.5** (drop the
+frontend nhentai CDN reconstruction — gated on adding `Thumbnail` to `source.GalleryDetail`)
+and **3.8** (an end-to-end `MatchSource` test with a MangaDex fake). Every **S** item is now
+done, and with 2.3 and 2.4 resolved, no open decisions remain.
 
 **Verified in the GUI (2026-07-18).** Every provider was probed live end to end (folder
 name → parser → API → mapped tags) *and* driven through the real UI, closing the gap this
 section previously flagged: the sweep loop, the provider chain, the pooled review card and
 the per-source chips all behave as intended against a real library.
 
-Remaining items, all independent: **3.9** (per-source rate-limit config — the one **S** item
-left) plus the two **M** items, **3.5** (drop the frontend CDN reconstruction, gated on a
+Remaining: the two **M** items — **3.5** (drop the frontend CDN reconstruction, gated on a
 `source.GalleryDetail.Thumbnail` field) and **3.8** (an end-to-end `MatchSource` test with a
-MangaDex fake). **3.4**, **3.6** and **3.7** landed this branch.
+MangaDex fake). **3.4**, **3.6**, **3.7** and **3.9** landed this branch; every **S** item
+in §3 is now done.

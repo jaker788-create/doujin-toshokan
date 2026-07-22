@@ -6,6 +6,7 @@ export namespace config {
 	    user_agent: string;
 	    base_url?: string;
 	    secrets?: Record<string, string>;
+	    rate_limit_ms?: number;
 	    enabled: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -19,6 +20,7 @@ export namespace config {
 	        this.user_agent = source["user_agent"];
 	        this.base_url = source["base_url"];
 	        this.secrets = source["secrets"];
+	        this.rate_limit_ms = source["rate_limit_ms"];
 	        this.enabled = source["enabled"];
 	    }
 	}

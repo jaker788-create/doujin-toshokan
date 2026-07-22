@@ -230,3 +230,23 @@ func TestNon2xxReturnsError(t *testing.T) {
 		t.Errorf("err = %v, want a 403 error", err)
 	}
 }
+
+// SetRateLimit overrides the throttle only for a positive duration; a non-positive value is
+// ignored so a zero/absent config override never collapses the request spacing to nothing.
+// (roadmap 3.9)
+func TestSetRateLimitGuardsNonPositive(t *testing.T) {
+	c := NewClient("k", "UA")
+	if c.RateLimit() != defaultInterval {
+		t.Fatalf("fresh client RateLimit() = %v, want default %v", c.RateLimit(), defaultInterval)
+	}
+	for _, d := range []time.Duration{0, -5 * time.Millisecond} {
+		c.SetRateLimit(d)
+		if c.RateLimit() != defaultInterval {
+			t.Errorf("SetRateLimit(%v) changed interval to %v; want default kept", d, c.RateLimit())
+		}
+	}
+	c.SetRateLimit(7 * time.Millisecond)
+	if c.RateLimit() != 7*time.Millisecond {
+		t.Errorf("SetRateLimit(7ms) => RateLimit() = %v, want 7ms", c.RateLimit())
+	}
+}

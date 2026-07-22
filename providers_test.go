@@ -4,7 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"doujin/internal/config"
 	"doujin/internal/doujin"
 	"doujin/internal/ingest"
 	"doujin/internal/search"
@@ -296,5 +298,42 @@ func TestGetMangaSourceLabel(t *testing.T) {
 				t.Errorf("source_label = %q, want %q", d.SourceLabel, c.want)
 			}
 		})
+	}
+}
+
+// A positive SourceConfig.RateLimitMs must reach the built client's throttle; 0 must leave
+// the provider's own default in place. Every provider is exercised, so a new one that
+// forgets the rateLimited methods — and would silently ignore the setting — fails here.
+// (roadmap 3.9)
+func TestBuildProviderAppliesRateLimit(t *testing.T) {
+	const override = 750 * time.Millisecond
+	for slug := range refHintSamples {
+		base := config.SourceConfig{Provider: slug, Enabled: true}
+		if slug == "nhentai" {
+			base.APIKey = "k" // nhentai won't build without one
+		}
+
+		tuned := base
+		tuned.RateLimitMs = int(override / time.Millisecond)
+		p, err := buildProvider(tuned)
+		if err != nil {
+			t.Fatalf("buildProvider(%s, tuned): %v", slug, err)
+		}
+		rl, ok := p.(rateLimited)
+		if !ok {
+			t.Fatalf("%s provider does not implement rateLimited — RateLimitMs would be ignored", slug)
+		}
+		if got := rl.RateLimit(); got != override {
+			t.Errorf("%s tuned RateLimit() = %v, want %v", slug, got, override)
+		}
+
+		// No override: the provider keeps its own (nonzero) default, distinct from ours.
+		d, err := buildProvider(base)
+		if err != nil {
+			t.Fatalf("buildProvider(%s, default): %v", slug, err)
+		}
+		if got := d.(rateLimited).RateLimit(); got <= 0 || got == override {
+			t.Errorf("%s default RateLimit() = %v, want a nonzero provider default", slug, got)
+		}
 	}
 }
