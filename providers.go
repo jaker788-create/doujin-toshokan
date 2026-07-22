@@ -102,7 +102,9 @@ func buildProvider(sc config.SourceConfig) (source.Provider, error) {
 		}
 		p = nhentai.NewClient(key, ua)
 	case mangadex.Slug:
-		p = mangadex.NewClient(ua)
+		// Empty BaseURL means the client's own default; the override exists so an API-domain
+		// move is recoverable from settings (see config.SourceConfig.BaseURL), as for hitomi.
+		p = mangadex.NewClient(ua, strings.TrimSpace(sc.BaseURL))
 	case hitomi.Slug:
 		// Empty BaseURL means the client's own default; the override exists so a data
 		// domain move is recoverable from settings (see config.SourceConfig.BaseURL).

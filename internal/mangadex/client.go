@@ -93,12 +93,19 @@ type Client struct {
 	authorIDs map[string]string
 }
 
-// NewClient returns a client sending the given descriptive User-Agent. MangaDex needs
-// no API key for reads.
-func NewClient(userAgent string) *Client {
+// NewClient returns a client sending the given descriptive User-Agent. baseURL overrides
+// the API endpoint — pass "" for the default. MangaDex needs no API key for reads. The
+// override mirrors hitomi/e-hentai: it makes an API-domain move recoverable from settings
+// (config.SourceConfig.BaseURL) rather than a release, and lets a test point the client at
+// a fake server through the real buildProvider path.
+func NewClient(userAgent, baseURL string) *Client {
+	base := strings.TrimSpace(baseURL)
+	if base == "" {
+		base = defaultBaseURL
+	}
 	return &Client{
 		userAgent: userAgent,
-		base:      defaultBaseURL,
+		base:      base,
 		interval:  defaultInterval,
 		http:      &http.Client{Timeout: requestTimeout},
 		authorIDs: map[string]string{},

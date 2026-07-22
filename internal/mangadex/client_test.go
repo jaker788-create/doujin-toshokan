@@ -36,8 +36,7 @@ func authorRouter(t *testing.T, authorJSON string) (*httptest.Server, *url.Value
 }
 
 func testClient(srv *httptest.Server) *Client {
-	c := NewClient("TestAgent/1.0")
-	c.base = srv.URL
+	c := NewClient("TestAgent/1.0", srv.URL)
 	c.interval = time.Millisecond
 	return c
 }
@@ -190,6 +189,17 @@ func TestGalleryByIDCarriesCover(t *testing.T) {
 	}
 	if want := "https://uploads.mangadex.org/covers/abc-123/cover.jpg.256.jpg"; d.Thumbnail != want {
 		t.Errorf("thumbnail = %q, want %q", d.Thumbnail, want)
+	}
+}
+
+// NewClient's baseURL override backs config.SourceConfig.BaseURL: empty keeps the default,
+// a value is trimmed and used (an API-domain move is then a settings edit, not a release).
+func TestBaseURLOverride(t *testing.T) {
+	if got := NewClient("UA", "").base; got != defaultBaseURL {
+		t.Errorf("empty baseURL gave %q, want %q", got, defaultBaseURL)
+	}
+	if got := NewClient("UA", "  https://example.test/api  ").base; got != "https://example.test/api" {
+		t.Errorf("override gave %q", got)
 	}
 }
 

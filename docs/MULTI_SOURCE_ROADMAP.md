@@ -32,8 +32,12 @@ Effort key: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days.
 > client's request spacing. And **3.5** finally landed: `source.GalleryDetail` grew a
 > `Thumbnail` field the providers fill server-side (nhentai assembles it from the detail
 > `images` type code, MangaDex/E-Hentai carry the cover the response already holds), so the
-> frontend's nhentai `media_id` + four-extension CDN cascade is gone. Only **3.8** — the
-> end-to-end `MatchSource` test — remains open.
+> frontend's nhentai `media_id` + four-extension CDN cascade is gone. Finally **3.8**
+> landed: an end-to-end `TestMatchSourceMangaDexEndToEnd` drives the real bound method
+> through `chainProviders` → `buildProvider` → a live `mangadex.Client` (pointed at a fake
+> server via a new `NewClient` base-URL override, mirroring hitomi/e-hentai) → the search
+> ladder → `Decide` → the detail preview. **Every roadmap item is now resolved** — the §3
+> list is complete and no open decisions remain.
 
 ---
 
@@ -384,9 +388,20 @@ its faceted count.
    metadata and the title button already opens the gallery). The titleless-candidate
    fallback label was gated the same way — "gallery #123" for a numeric id, bare "gallery"
    otherwise — so no raw UUID leaks there either.
-8. **End-to-end `MatchSource` test with a MangaDex fake — M.** Current tests cover the
-   MangaDex client and the matcher separately; an integration test through
-   `activeProvider()` → `gatherCandidates` → `Decide` would lock the wiring.
+8. **End-to-end `MatchSource` test with a MangaDex fake — ✅ DONE.**
+   `TestMatchSourceMangaDexEndToEnd` locks the whole wiring the client/matcher unit tests
+   left uncovered: it ingests a local title, points config at a fake MangaDex server as the
+   active source, and calls the real `MatchSource` bound method — so `chainProviders` →
+   `buildProvider` → a live `mangadex.Client` → the search ladder → `gatherCandidates` →
+   `Decide` → the detail-fetched preview all run as one piece. It asserts the auto decision,
+   the MangaDex provenance (`SourceSlug`/`SourceLabel`), the merge set, and the preview's
+   tags + server-built cover.
+   - This needed one production change: `mangadex.NewClient` gained a `baseURL` parameter
+     (empty = default), wired through `buildProvider` from `config.SourceConfig.BaseURL` — the
+     same override hitomi and e-hentai already had, so the fake server is reached through the
+     real build path rather than a test-only seam. It doubles as domain-move insurance
+     (`api.mangadex.org` becomes a settings edit, not a release), and `TestBaseURLOverride`
+     pins it.
 9. **Per-source rate-limit config — ✅ DONE.** `config.SourceConfig.RateLimitMs` (0 = the
    provider default) now overrides a client's request spacing. Each client grew a
    `SetRateLimit`/`RateLimit` pair over its existing single-limiter throttle, and
@@ -424,20 +439,20 @@ e-hentai cookies (2.4) ───────► ❌ won't do — keyless API is 
 id display (3.7) ─────────────► ✅ done — non-numeric ids hidden in the match picker
 rate-limit config (3.9) ──────► ✅ done — SourceConfig.RateLimitMs overrides the throttle
 server-side covers (3.5) ─────► ✅ done — GalleryDetail.Thumbnail; frontend cascade removed
+matchsource e2e test (3.8) ───► ✅ done — real bound method through a fake MangaDex server
 ```
 
-**Next up: the one remaining §3 item — 3.8** (an end-to-end `MatchSource` test with a
-MangaDex fake). Every **S** item is done, every open decision is resolved, and **3.5** was
-the last of the **M** items besides it.
+**The roadmap is complete.** Every deliverable, decision and §3 improvement is resolved;
+nothing is deferred. Further work would be new scope (a new provider, or one of the §4
+out-of-scope items), not a continuation of this plan.
 
 **Verified in the GUI (2026-07-18).** Every provider was probed live end to end (folder
 name → parser → API → mapped tags) *and* driven through the real UI, closing the gap this
 section previously flagged: the sweep loop, the provider chain, the pooled review card and
 the per-source chips all behave as intended against a real library.
 
-Remaining: one **M** item — **3.8** (an end-to-end `MatchSource` test with a MangaDex fake).
-**3.4**, **3.5**, **3.6**, **3.7** and **3.9** landed this branch; every **S** item in §3 is
-done and no open decisions remain.
+Remaining: nothing. **3.4**, **3.5**, **3.6**, **3.7**, **3.8** and **3.9** all landed this
+branch; every §3 item is done and no open decisions remain.
 
 > **GUI note (3.5).** The cover-URL construction is unit-tested end to end (type code →
 > extension → absolute URL) for all three providers, but the actual image load in WebView2 —
